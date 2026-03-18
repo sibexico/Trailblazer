@@ -1,0 +1,74 @@
+name: Build Release Binaries
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            ext: ""
+          - os: windows-latest
+            goos: windows
+            ext: ".exe"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Parse version from release tag
+        id: meta
+        shell: bash
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version="$(echo "$tag" | sed -E 's/.*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+          if [[ -z "$version" || "$version" == "$tag" && ! "$tag" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Could not parse x.y.z version from tag: $tag" >&2
+            exit 1
+          fi
+          filename="trailblazer_${version}_${{ matrix.goos }}_x86_64${{ matrix.ext }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags "-s -w" -o "${{ steps.meta.outputs.filename }}" .
+
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.meta.outputs.filename }}
+
+  publish-winget:
+    needs: build-and-upload
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.release.draft && vars.WINGET_PACKAGE_IDENTIFIER != '' && secrets.WINGET_TOKEN != '' }}
+
+    steps:
+      - name: Publish release to WinGet
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
+          release-tag: ${{ github.event.release.tag_name }}
+          installers-regex: '_windows_x86_64\\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}

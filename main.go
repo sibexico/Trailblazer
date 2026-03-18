@@ -171,7 +171,7 @@ func newModel(csvPath string) (model, error) {
 	if versionFromFile != "" {
 		m.setCurrentVersion(versionFromFile)
 	}
-	m.filterVersion = m.currentVersion
+	m.filterVersion = ""
 	m.lastVersionFile = versionFromFile
 	m.rebuildVisible()
 	if isNewProject {
@@ -239,7 +239,6 @@ func (m model) handleRuntimeMsg(msg tea.Msg) (model, tea.Cmd, bool) {
 			m.lastVersionFile = msg.version
 			if m.currentVersion != msg.version {
 				m.setCurrentVersion(msg.version)
-				m.filterVersion = msg.version
 				m.rebuildVisible()
 				m.status = "version updated from VERSION: " + msg.version
 			}
@@ -251,77 +250,115 @@ func (m model) handleRuntimeMsg(msg tea.Msg) (model, tea.Cmd, bool) {
 }
 
 func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch k.String() {
+	key := k.String()
+	if next, cmd, handled := m.handleNavigationKey(key); handled {
+		return next, cmd
+	}
+	if next, cmd, handled := m.handleTaskEditingKey(key); handled {
+		return next, cmd
+	}
+	if next, cmd, handled := m.handleFilterKey(key); handled {
+		return next, cmd
+	}
+	if next, cmd, handled := m.handleExportKey(key); handled {
+		return next, cmd
+	}
+	return m, nil
+}
+
+func (m model) handleNavigationKey(key string) (model, tea.Cmd, bool) {
+	switch key {
 	case "ctrl+c", "q":
-		return m, tea.Quit
+		return m, tea.Quit, true
 	case "up", "k":
 		m.moveCursor(-1)
-		return m, nil
+		return m, nil, true
 	case "down", "j":
 		m.moveCursor(1)
-		return m, nil
+		return m, nil, true
 	case "left", "h":
 		m.setSelectedExpanded(false)
-		return m, nil
+		return m, nil, true
 	case "right", "l", "enter":
 		m.setSelectedExpanded(true)
-		return m, nil
+		return m, nil, true
 	case "space", " ":
-		return m, m.toggleSelectedDoneCmd()
+		return m, m.toggleSelectedDoneCmd(), true
+	default:
+		return m, nil, false
+	}
+}
+
+func (m model) handleTaskEditingKey(key string) (model, tea.Cmd, bool) {
+	switch key {
 	case "a":
 		m.startAddTask(true)
-		return m, nil
+		return m, nil, true
 	case "A":
 		m.startAddTask(false)
-		return m, nil
+		return m, nil, true
 	case "d", "x":
 		t := m.selected()
 		if t == nil {
-			return m, nil
+			return m, nil, true
 		}
 		m.deleteCascade(t)
 		m.rebuildVersions()
 		m.rebuildVisible()
 		m.status = "deleted " + t.ID
-		return m, m.saveCmd()
+		return m, m.saveCmd(), true
 	case "n":
 		m.startInput(actionNewVersion, "new version", "")
-		return m, nil
+		return m, nil, true
 	case "r":
 		t := m.selected()
 		if t == nil {
-			return m, nil
+			return m, nil, true
 		}
 		m.inputTargetID = t.ID
 		m.startInput(actionSetVersion, "set version (empty clears)", t.Version)
-		return m, nil
+		return m, nil, true
+	default:
+		return m, nil, false
+	}
+}
+
+func (m model) handleFilterKey(key string) (model, tea.Cmd, bool) {
+	switch key {
 	case "]":
 		m.cycleFilter(1)
 		m.rebuildVisible()
-		return m, nil
+		return m, nil, true
 	case "[":
 		m.cycleFilter(-1)
 		m.rebuildVisible()
-		return m, nil
+		return m, nil, true
 	case "0":
 		m.filterVersion = ""
 		m.rebuildVisible()
-		return m, nil
+		return m, nil, true
+	default:
+		return m, nil, false
+	}
+}
+
+func (m model) handleExportKey(key string) (model, tea.Cmd, bool) {
+	switch key {
 	case "e":
 		if err := m.syncCurrentVersionFromFile(); err != nil {
 			m.status = "version read failed: " + err.Error()
-			return m, nil
+			return m, nil, true
 		}
-		return m, m.exportCmd(false)
+		return m, m.exportCmd(false), true
 	case "E":
 		if err := m.syncCurrentVersionFromFile(); err != nil {
 			m.status = "version read failed: " + err.Error()
-			return m, nil
+			return m, nil, true
 		}
-		return m, m.exportCmd(true)
+		return m, m.exportCmd(true), true
+	default:
+		return m, nil, false
 	}
-
-	return m, nil
 }
 
 func (m model) updateInput(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -422,7 +459,6 @@ func (m *model) commitNewVersion(value string) (tea.Cmd, bool) {
 		return nil, false
 	}
 	m.setCurrentVersion(value)
-	m.filterVersion = value
 	m.rebuildVisible()
 	m.status = "version " + value
 	return m.writeVersionFileCmd(value), true
@@ -461,7 +497,6 @@ func (m *model) commitInitCurrentVersion(value string) (tea.Cmd, bool) {
 			return nil, false
 		}
 		m.setCurrentVersion(value)
-		m.filterVersion = value
 		m.rebuildVisible()
 		m.status = "project initialized"
 		return tea.Batch(m.saveCmd(), m.writeVersionFileCmd(value)), true
@@ -575,11 +610,20 @@ func (m *model) rebuildVersions() {
 }
 
 func (m *model) rebuildVisible() {
-	// Rebuild the visible list used for cursor-based navigation.
-	selectedID := ""
+	selectedID := m.selectedID()
+	matchPath, matchSelf := m.computeVisibleMatchMaps()
+	m.visible = m.buildVisibleRows(matchPath, matchSelf)
+	m.restoreCursor(selectedID)
+}
+
+func (m *model) selectedID() string {
 	if sel := m.selected(); sel != nil {
-		selectedID = sel.ID
+		return sel.ID
 	}
+	return ""
+}
+
+func (m *model) computeVisibleMatchMaps() (map[*task]bool, map[*task]bool) {
 	matchPath := map[*task]bool{}
 	matchSelf := map[*task]bool{}
 	var mark func(*task) bool
@@ -598,7 +642,10 @@ func (m *model) rebuildVisible() {
 	for _, r := range m.roots {
 		mark(r)
 	}
+	return matchPath, matchSelf
+}
 
+func (m *model) buildVisibleRows(matchPath, matchSelf map[*task]bool) []visibleTask {
 	out := make([]visibleTask, 0, len(m.tasksByID))
 	var walk func(nodes []*task, ancestorsLast []bool)
 	walk = func(nodes []*task, ancestorsLast []bool) {
@@ -607,21 +654,7 @@ func (m *model) rebuildVisible() {
 				continue
 			}
 			last := i == len(nodes)-1
-			prefix := ""
-			for _, wasLast := range ancestorsLast {
-				if wasLast {
-					prefix += "  "
-				} else {
-					prefix += "│ "
-				}
-			}
-			if len(ancestorsLast) > 0 {
-				if last {
-					prefix += "└─"
-				} else {
-					prefix += "├─"
-				}
-			}
+			prefix := treePrefix(ancestorsLast, last)
 			out = append(out, visibleTask{Node: t, Prefix: prefix, Match: matchSelf[t]})
 			if t.Expanded {
 				ancestorsLast = append(ancestorsLast, last)
@@ -631,17 +664,36 @@ func (m *model) rebuildVisible() {
 		}
 	}
 	walk(m.roots, nil)
-	m.visible = out
+	return out
+}
+
+func treePrefix(ancestorsLast []bool, isLast bool) string {
+	prefix := ""
+	for _, wasLast := range ancestorsLast {
+		if wasLast {
+			prefix += "  "
+		} else {
+			prefix += "│ "
+		}
+	}
+	if len(ancestorsLast) == 0 {
+		return prefix
+	}
+	if isLast {
+		return prefix + "└─"
+	}
+	return prefix + "├─"
+}
+
+func (m *model) restoreCursor(selectedID string) {
 	if len(m.visible) == 0 {
 		m.cursor = 0
 		return
 	}
 	if selectedID != "" {
-		for i, v := range m.visible {
-			if v.Node.ID == selectedID {
-				m.cursor = i
-				return
-			}
+		if idx := m.visibleIndex(selectedID); idx >= 0 {
+			m.cursor = idx
+			return
 		}
 	}
 	if m.cursor >= len(m.visible) {
@@ -650,6 +702,15 @@ func (m *model) rebuildVisible() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+}
+
+func (m *model) visibleIndex(id string) int {
+	for i, v := range m.visible {
+		if v.Node.ID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func (m *model) cursorToID(id string) {
@@ -691,7 +752,6 @@ func (m *model) syncCurrentVersionFromFile() error {
 		return nil
 	}
 	m.setCurrentVersion(v)
-	m.filterVersion = v
 	m.rebuildVisible()
 	m.status = "version updated from VERSION: " + v
 	return nil
@@ -747,7 +807,7 @@ func (m model) exportCmd(includeSubtasks bool) tea.Cmd {
 func (m model) View() string {
 	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Current Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
 	body := m.renderBody()
-	footer := faintStyle.Render("q quit | j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle filter | 0 clear filter | e export-parents | E export-full")
+	footer := faintStyle.Render("q quit | arrows/j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle filter | 0 clear filter | e export-parents | E export-full")
 	status := openStyle.Render("status: " + m.status)
 	if m.mode == modeInput {
 		status = cursorStyle.Render("input: ") + m.input.View()
@@ -884,13 +944,26 @@ func parseVersionValue(s string) string {
 }
 
 func loadCSV(path string) ([]*task, map[string]*task, error) {
-	// Create nodes, then connect parent-child links.
-	file, err := os.Open(path)
+	recs, err := readCSVRecords(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return []*task{}, map[string]*task{}, nil
 		}
 		return nil, nil, err
+	}
+	if len(recs) == 0 {
+		return []*task{}, map[string]*task{}, nil
+	}
+	rows := parseTaskRows(recs)
+	byID := buildTaskIndex(rows)
+	roots := buildTaskTree(rows, byID)
+	return roots, byID, nil
+}
+
+func readCSVRecords(path string) ([][]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
 	defer file.Close()
 
@@ -902,15 +975,16 @@ func loadCSV(path string) ([]*task, map[string]*task, error) {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return nil, nil, err
+			return nil, err
 		}
 		recs = append(recs, rec)
 	}
-	if len(recs) == 0 {
-		return []*task{}, map[string]*task{}, nil
-	}
+	return recs, nil
+}
+
+func parseTaskRows(recs [][]string) []taskRow {
 	start := 0
-	if len(recs[0]) >= 1 && strings.EqualFold(strings.TrimSpace(recs[0][0]), "ID") {
+	if len(recs) > 0 && len(recs[0]) > 0 && strings.EqualFold(strings.TrimSpace(recs[0][0]), "ID") {
 		start = 1
 	}
 	rows := make([]taskRow, 0, len(recs)-start)
@@ -928,7 +1002,10 @@ func loadCSV(path string) ([]*task, map[string]*task, error) {
 			Title:    strings.TrimSpace(rec[5]),
 		})
 	}
+	return rows
+}
 
+func buildTaskIndex(rows []taskRow) map[string]*task {
 	byID := make(map[string]*task, len(rows))
 	for _, row := range rows {
 		if row.ID == "" {
@@ -944,6 +1021,10 @@ func loadCSV(path string) ([]*task, map[string]*task, error) {
 			Expanded: true,
 		}
 	}
+	return byID
+}
+
+func buildTaskTree(rows []taskRow, byID map[string]*task) []*task {
 	roots := make([]*task, 0)
 	for _, row := range rows {
 		n := byID[row.ID]
@@ -961,7 +1042,7 @@ func loadCSV(path string) ([]*task, map[string]*task, error) {
 			roots = append(roots, n)
 		}
 	}
-	return roots, byID, nil
+	return roots
 }
 
 func flattenRows(roots []*task) []taskRow {
