@@ -1,4 +1,4 @@
-module github.com/sibexico/trailblazer
+module github.com/sibexico/Trailblazer
 
 go 1.24.0
 
