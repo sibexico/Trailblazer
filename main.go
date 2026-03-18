@@ -40,6 +40,7 @@ type taskRow struct {
 type visibleTask struct {
 	Node   *task
 	Prefix string
+	Match  bool
 }
 
 type mode int
@@ -90,6 +91,7 @@ type model struct {
 	visible         []visibleTask
 	cursor          int
 	currentVersion  string
+	filterVersion   string
 	lastVersionFile string
 	versions        []string
 	mode            mode
@@ -169,6 +171,7 @@ func newModel(csvPath string) (model, error) {
 	if versionFromFile != "" {
 		m.setCurrentVersion(versionFromFile)
 	}
+	m.filterVersion = m.currentVersion
 	m.lastVersionFile = versionFromFile
 	m.rebuildVisible()
 	if isNewProject {
@@ -236,6 +239,7 @@ func (m model) handleRuntimeMsg(msg tea.Msg) (model, tea.Cmd, bool) {
 			m.lastVersionFile = msg.version
 			if m.currentVersion != msg.version {
 				m.setCurrentVersion(msg.version)
+				m.filterVersion = msg.version
 				m.rebuildVisible()
 				m.status = "version updated from VERSION: " + msg.version
 			}
@@ -292,15 +296,15 @@ func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.startInput(actionSetVersion, "set version (empty clears)", t.Version)
 		return m, nil
 	case "]":
-		m.cycleVersion(1)
+		m.cycleFilter(1)
 		m.rebuildVisible()
 		return m, nil
 	case "[":
-		m.cycleVersion(-1)
+		m.cycleFilter(-1)
 		m.rebuildVisible()
 		return m, nil
 	case "0":
-		m.setCurrentVersion("")
+		m.filterVersion = ""
 		m.rebuildVisible()
 		return m, nil
 	case "e":
@@ -418,6 +422,7 @@ func (m *model) commitNewVersion(value string) (tea.Cmd, bool) {
 		return nil, false
 	}
 	m.setCurrentVersion(value)
+	m.filterVersion = value
 	m.rebuildVisible()
 	m.status = "version " + value
 	return m.writeVersionFileCmd(value), true
@@ -430,10 +435,6 @@ func (m *model) commitSetTaskVersion(value string) (tea.Cmd, bool) {
 		return nil, true
 	}
 	t.Version = value
-	if value != "" && !contains(m.versions, value) {
-		m.versions = append(m.versions, value)
-		sort.Strings(m.versions)
-	}
 	m.rebuildVersions()
 	m.rebuildVisible()
 	m.cursorToID(t.ID)
@@ -460,6 +461,7 @@ func (m *model) commitInitCurrentVersion(value string) (tea.Cmd, bool) {
 			return nil, false
 		}
 		m.setCurrentVersion(value)
+		m.filterVersion = value
 		m.rebuildVisible()
 		m.status = "project initialized"
 		return tea.Batch(m.saveCmd(), m.writeVersionFileCmd(value)), true
@@ -535,15 +537,15 @@ func (m *model) startAddTask(asChild bool) {
 	m.startInput(actionAddRoot, "new root task (f:/b:/i: prefix)", "")
 }
 
-func (m *model) cycleVersion(delta int) {
+func (m *model) cycleFilter(delta int) {
 	options := append([]string{""}, m.versions...)
 	if len(options) <= 1 {
-		m.currentVersion = ""
+		m.filterVersion = ""
 		return
 	}
 	idx := 0
 	for i, v := range options {
-		if v == m.currentVersion {
+		if v == m.filterVersion {
 			idx = i
 			break
 		}
@@ -552,7 +554,7 @@ func (m *model) cycleVersion(delta int) {
 	if idx < 0 {
 		idx += len(options)
 	}
-	m.currentVersion = options[idx]
+	m.filterVersion = options[idx]
 }
 
 func (m *model) rebuildVersions() {
@@ -578,11 +580,32 @@ func (m *model) rebuildVisible() {
 	if sel := m.selected(); sel != nil {
 		selectedID = sel.ID
 	}
+	matchPath := map[*task]bool{}
+	matchSelf := map[*task]bool{}
+	var mark func(*task) bool
+	mark = func(t *task) bool {
+		self := m.filterVersion == "" || t.Version == m.filterVersion
+		child := false
+		for _, c := range t.Children {
+			if mark(c) {
+				child = true
+			}
+		}
+		matchSelf[t] = self
+		matchPath[t] = self || child
+		return matchPath[t]
+	}
+	for _, r := range m.roots {
+		mark(r)
+	}
 
 	out := make([]visibleTask, 0, len(m.tasksByID))
 	var walk func(nodes []*task, ancestorsLast []bool)
 	walk = func(nodes []*task, ancestorsLast []bool) {
 		for i, t := range nodes {
+			if !matchPath[t] {
+				continue
+			}
 			last := i == len(nodes)-1
 			prefix := ""
 			for _, wasLast := range ancestorsLast {
@@ -599,7 +622,7 @@ func (m *model) rebuildVisible() {
 					prefix += "├─"
 				}
 			}
-			out = append(out, visibleTask{Node: t, Prefix: prefix})
+			out = append(out, visibleTask{Node: t, Prefix: prefix, Match: matchSelf[t]})
 			if t.Expanded {
 				ancestorsLast = append(ancestorsLast, last)
 				walk(t.Children, ancestorsLast)
@@ -668,6 +691,7 @@ func (m *model) syncCurrentVersionFromFile() error {
 		return nil
 	}
 	m.setCurrentVersion(v)
+	m.filterVersion = v
 	m.rebuildVisible()
 	m.status = "version updated from VERSION: " + v
 	return nil
@@ -721,9 +745,9 @@ func (m model) exportCmd(includeSubtasks bool) tea.Cmd {
 }
 
 func (m model) View() string {
-	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Current Version: %s", m.projectName, filepath.Base(m.csvPath), showVersion(m.currentVersion)))
+	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Current Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
 	body := m.renderBody()
-	footer := faintStyle.Render("q quit | j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle version | 0 all | e export-parents | E export-full")
+	footer := faintStyle.Render("q quit | j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle filter | 0 clear filter | e export-parents | E export-full")
 	status := openStyle.Render("status: " + m.status)
 	if m.mode == modeInput {
 		status = cursorStyle.Render("input: ") + m.input.View()
@@ -745,6 +769,9 @@ func (m model) renderBody() string {
 		title := t.Title
 		if t.Status == "done" {
 			title = doneStyle.Render(title)
+		}
+		if m.filterVersion != "" && !v.Match {
+			title = faintStyle.Render(title)
 		}
 		version := ""
 		if t.Version != "" {
@@ -1099,7 +1126,15 @@ func (m model) isMissed(t *task) bool {
 	return taskVer < cur
 }
 
-func showVersion(v string) string {
+func showCurrentVersion(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "unknown"
+	}
+	return v
+}
+
+func showFilterVersion(v string) string {
 	if v == "" {
 		return "all"
 	}
