@@ -27,3 +27,4 @@ go.work.sum
 trailblazer.md
 trailblazer.csv
 *.tape
+*.yaml
