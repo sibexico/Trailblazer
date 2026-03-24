@@ -2,7 +2,7 @@ name: Build Release Binaries
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 permissions:
   contents: write
@@ -62,13 +62,18 @@ jobs:
   publish-winget:
     needs: build-and-upload
     runs-on: ubuntu-latest
-    if: ${{ !github.event.release.draft && vars.WINGET_PACKAGE_IDENTIFIER != '' && secrets.WINGET_TOKEN != '' }}
+    if: ${{ !github.event.release.draft && vars.WINGET_PACKAGE_IDENTIFIER != '' }}
 
     steps:
+      - name: Skip WinGet publish (missing token)
+        if: ${{ secrets.WINGET_TOKEN == '' }}
+        run: echo "WINGET_TOKEN is not configured; skipping WinGet publish"
+
       - name: Publish release to WinGet
+        if: ${{ secrets.WINGET_TOKEN != '' }}
         uses: vedantmgoyal9/winget-releaser@v2
         with:
           identifier: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
           release-tag: ${{ github.event.release.tag_name }}
-          installers-regex: '_windows_x86_64\\.exe$'
+          installers-regex: '_windows_x86_64\.exe$'
           token: ${{ secrets.WINGET_TOKEN }}
