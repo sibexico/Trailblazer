@@ -58,3 +58,17 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.meta.outputs.filename }}
+
+  publish-winget:
+    needs: build-and-upload
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.release.draft && vars.WINGET_PACKAGE_IDENTIFIER != '' && secrets.WINGET_TOKEN != '' }}
+
+    steps:
+      - name: Publish release to WinGet
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
+          release-tag: ${{ github.event.release.tag_name }}
+          installers-regex: '_windows_x86_64\\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}

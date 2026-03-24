@@ -6,6 +6,7 @@
 
 ![Go Version](https://img.shields.io/badge/Go-1.26.1-blue?labelColor=gray&logo=go)
  [![Go Report Card](https://goreportcard.com/badge/github.com/sibexico/Trailblazer)](https://goreportcard.com/report/github.com/sibexico/Trailblazer)
+ [![Support Me](https://img.shields.io/badge/Support-Me-darkgreen?labelColor=black&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iI0ZGRiIgZmlsbC1ydWxlPSJldmVub2RkIiBjbGlwLXJ1bGU9ImV2ZW5vZGQiIGQ9Ik0xMiAxQzUuOTI1IDEgMSA1LjkyNSAxIDEyczQuOTI1IDExIDExIDExIDExLTQuOTI1IDExLTExUzE4LjA3NSAxIDEyIDF6bTAgNGwyLjUgNi41SDIxbC01LjUgNCAyIDYuNUwxMiAxNy41IDYgMjJsMi02LjUtNS41LTRoNi41TDEyIDV6Ii8%2BPC9zdmc%2B)](https://sibexi.co/support)
 
 
 # Trailblazer
@@ -18,12 +19,26 @@ Trailblazer is an easy terminal roadmap planner written in Go. I use it daily to
 go install github.com/sibexico/Trailblazer@latest
 ```
 
+### In Windows:
+
+```powershell
+winget sibexico.Trailblazer
+```
+
+
 ## Quick start
 
 Run against a directory (uses directory/trailblazer.csv):
 
 ```bash
 trailblazer /path/to/project
+```
+
+Generate Markdown:
+
+```bash
+trailblazer -e /path/to/project   # parents only (same as key e)
+trailblazer -E /path/to/project   # full tree (same as key E)
 ```
 
 

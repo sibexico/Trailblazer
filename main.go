@@ -117,10 +117,12 @@ var (
 )
 
 func main() {
-	pathArg := ""
-	if len(os.Args) > 1 {
-		pathArg = strings.TrimSpace(os.Args[1])
+	pathArg, exportMode, err := parseCLIArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "args error: %v\n", err)
+		os.Exit(1)
 	}
+
 	path, err := resolveCSVPath(pathArg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "path error: %v\n", err)
@@ -133,10 +135,55 @@ func main() {
 		os.Exit(1)
 	}
 
+	if exportMode != 0 {
+		if err := m.syncCurrentVersionFromFile(); err != nil {
+			fmt.Fprintf(os.Stderr, "version read failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := m.exportNow(exportMode == 2); err != nil {
+			fmt.Fprintf(os.Stderr, "export error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func parseCLIArgs(args []string) (string, int, error) {
+	pathArg := ""
+	exportMode := 0
+	for _, raw := range args {
+		a := strings.TrimSpace(raw)
+		if a == "" {
+			continue
+		}
+		switch a {
+		case "-e":
+			if exportMode != 0 {
+				return "", 0, fmt.Errorf("use only one export flag: -e or -E")
+			}
+			exportMode = 1
+			continue
+		case "-E":
+			if exportMode != 0 {
+				return "", 0, fmt.Errorf("use only one export flag: -e or -E")
+			}
+			exportMode = 2
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			return "", 0, fmt.Errorf("unknown flag: %s", a)
+		}
+		if pathArg != "" {
+			return "", 0, fmt.Errorf("multiple paths provided")
+		}
+		pathArg = a
+	}
+	return pathArg, exportMode, nil
 }
 
 func newModel(csvPath string) (model, error) {
@@ -795,7 +842,7 @@ func (m model) saveCmd() tea.Cmd {
 
 func (m model) exportCmd(includeSubtasks bool) tea.Cmd {
 	// Export roadmap to Markdown: parents-only or full tree.
-	path := filepath.Join(filepath.Dir(m.csvPath), "trailblazer.md")
+	path := exportPathForCSV(m.csvPath)
 	roots := m.roots
 	currentVersion := m.currentVersion
 	return func() tea.Msg {
@@ -804,8 +851,16 @@ func (m model) exportCmd(includeSubtasks bool) tea.Cmd {
 	}
 }
 
+func (m model) exportNow(includeSubtasks bool) error {
+	return writeMarkdown(exportPathForCSV(m.csvPath), m.roots, m.currentVersion, includeSubtasks)
+}
+
+func exportPathForCSV(csvPath string) string {
+	return filepath.Join(filepath.Dir(csvPath), "trailblazer.md")
+}
+
 func (m model) View() string {
-	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Current Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
+	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Project Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
 	body := m.renderBody()
 	footer := faintStyle.Render("q quit | arrows/j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle filter | 0 clear filter | e export-parents | E export-full")
 	status := openStyle.Render("status: " + m.status)
