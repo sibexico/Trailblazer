@@ -63,17 +63,19 @@ jobs:
     needs: build-and-upload
     runs-on: ubuntu-latest
     if: ${{ !github.event.release.draft && vars.WINGET_PACKAGE_IDENTIFIER != '' }}
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
 
     steps:
       - name: Skip WinGet publish (missing token)
-        if: ${{ secrets.WINGET_TOKEN == '' }}
+        if: ${{ env.WINGET_TOKEN == '' }}
         run: echo "WINGET_TOKEN is not configured; skipping WinGet publish"
 
       - name: Publish release to WinGet
-        if: ${{ secrets.WINGET_TOKEN != '' }}
+        if: ${{ env.WINGET_TOKEN != '' }}
         uses: vedantmgoyal9/winget-releaser@v2
         with:
           identifier: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
           release-tag: ${{ github.event.release.tag_name }}
           installers-regex: '_windows_x86_64\.exe$'
-          token: ${{ secrets.WINGET_TOKEN }}
+          token: ${{ env.WINGET_TOKEN }}
