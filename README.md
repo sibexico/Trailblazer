@@ -41,10 +41,17 @@ trailblazer -e /path/to/project   # parents only (same as key e)
 trailblazer -E /path/to/project   # full tree (same as key E)
 ```
 
+Show CLI help:
+
+```bash
+trailblazer -h
+```
+
 
 ## Handy keys
 
 - q: quit
+- ?: show in-app key hints
 - arrows / j / k: move
 - h / l / enter: collapse / expand
 - a / A: add child / root task

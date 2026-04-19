@@ -117,10 +117,16 @@ var (
 )
 
 func main() {
-	pathArg, exportMode, err := parseCLIArgs(os.Args[1:])
+	pathArg, exportMode, showHelp, err := parseCLIArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "args error: %v\n", err)
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, usageText())
 		os.Exit(1)
+	}
+	if showHelp {
+		fmt.Print(usageText())
+		return
 	}
 
 	path, err := resolveCSVPath(pathArg)
@@ -153,37 +159,73 @@ func main() {
 	}
 }
 
-func parseCLIArgs(args []string) (string, int, error) {
+func parseCLIArgs(args []string) (string, int, bool, error) {
 	pathArg := ""
 	exportMode := 0
+	showHelp := false
 	for _, raw := range args {
 		a := strings.TrimSpace(raw)
 		if a == "" {
 			continue
 		}
 		switch a {
+		case "-h", "--help":
+			showHelp = true
+			continue
 		case "-e":
 			if exportMode != 0 {
-				return "", 0, fmt.Errorf("use only one export flag: -e or -E")
+				return "", 0, false, fmt.Errorf("use only one export flag: -e or -E")
 			}
 			exportMode = 1
 			continue
 		case "-E":
 			if exportMode != 0 {
-				return "", 0, fmt.Errorf("use only one export flag: -e or -E")
+				return "", 0, false, fmt.Errorf("use only one export flag: -e or -E")
 			}
 			exportMode = 2
 			continue
 		}
 		if strings.HasPrefix(a, "-") {
-			return "", 0, fmt.Errorf("unknown flag: %s", a)
+			return "", 0, false, fmt.Errorf("unknown flag: %s", a)
 		}
 		if pathArg != "" {
-			return "", 0, fmt.Errorf("multiple paths provided")
+			return "", 0, false, fmt.Errorf("multiple paths provided")
 		}
 		pathArg = a
 	}
-	return pathArg, exportMode, nil
+	if showHelp {
+		return "", 0, true, nil
+	}
+	return pathArg, exportMode, false, nil
+}
+
+func usageText() string {
+	return strings.TrimSpace(`Trailblazer - terminal roadmap planner
+
+Usage:
+  trailblazer [flags] [path]
+
+Arguments:
+  path                  CSV file or directory (default: ./trailblazer.csv)
+
+Flags:
+  -e                    Export parents-only markdown and exit
+  -E                    Export full markdown tree and exit
+  -h, --help            Show this help
+
+TUI keys:
+  q                     Quit
+  arrows/j/k            Move cursor
+  h/l or Enter          Collapse/expand selected task
+  a / A                 Add child/root task
+  space                 Toggle done/open
+  d / x                 Delete selected task with children
+  n                     Set current version
+  r                     Set selected task version
+  [ / ]                 Cycle version filter
+  0                     Clear version filter
+  e / E                 Export parents-only/full markdown
+`) + "\n"
 }
 
 func newModel(csvPath string) (model, error) {
@@ -317,6 +359,9 @@ func (m model) handleNavigationKey(key string) (model, tea.Cmd, bool) {
 	switch key {
 	case "ctrl+c", "q":
 		return m, tea.Quit, true
+	case "?":
+		m.status = shortHelpText()
+		return m, nil, true
 	case "up", "k":
 		m.moveCursor(-1)
 		return m, nil, true
@@ -516,6 +561,15 @@ func (m *model) commitSetTaskVersion(value string) (tea.Cmd, bool) {
 	if t == nil {
 		m.status = "task not found"
 		return nil, true
+	}
+	value = strings.TrimSpace(value)
+	if value != "" {
+		parsed := parseVersionValue(value)
+		if parsed == "" {
+			m.status = "invalid version format (use x.y.z)"
+			return nil, false
+		}
+		value = parsed
 	}
 	t.Version = value
 	m.rebuildVersions()
@@ -862,12 +916,16 @@ func exportPathForCSV(csvPath string) string {
 func (m model) View() string {
 	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Project Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
 	body := m.renderBody()
-	footer := faintStyle.Render("q quit | arrows/j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle filter | 0 clear filter | e export-parents | E export-full")
+	footer := faintStyle.Render("q quit | ? help | arrows/j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle filter | 0 clear filter | e export-parents | E export-full")
 	status := openStyle.Render("status: " + m.status)
 	if m.mode == modeInput {
 		status = cursorStyle.Render("input: ") + m.input.View()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer, status)
+}
+
+func shortHelpText() string {
+	return "keys: a/A add task, space toggle done, d delete, n/r version, [/] filter, e/E export"
 }
 
 func (m model) renderBody() string {
@@ -1129,6 +1187,7 @@ func writeRows(path string, rows []taskRow) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = os.Remove(tmp) }()
 	w := csv.NewWriter(f)
 	if err := w.Write([]string{"ID", "ParentID", "Version", "Type", "Status", "Title"}); err != nil {
 		f.Close()
@@ -1149,8 +1208,20 @@ func writeRows(path string, rows []taskRow) error {
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(path)
+		// Windows can't rename over an existing file. Fallback to remove+rename,
+		// with best-effort restoration if replacement fails.
+		oldData, readErr := os.ReadFile(path)
+		hadOld := readErr == nil
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return readErr
+		}
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			return rmErr
+		}
 		if err2 := os.Rename(tmp, path); err2 != nil {
+			if hadOld {
+				_ = os.WriteFile(path, oldData, 0o644)
+			}
 			return err2
 		}
 	}
