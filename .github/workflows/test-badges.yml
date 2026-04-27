@@ -1,0 +1,92 @@
+name: Test Badges
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  test-and-update-badges:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests and update badge lines
+        id: badges
+        shell: bash
+        run: |
+          set +e
+          go test ./... -coverprofile=coverage.out -covermode=atomic
+          test_exit=$?
+          set -e
+
+          if [ -f coverage.out ]; then
+            coverage="$(go tool cover -func=coverage.out | awk '/^total:/{gsub("%", "", $3); print $3}')"
+          else
+            coverage="0.0"
+          fi
+          coverage="${coverage:-0.0}"
+
+          if [ "$test_exit" -eq 0 ]; then
+            tests_label="Passed"
+            tests_color="brightgreen"
+            tests_ok="true"
+          else
+            tests_label="Failed"
+            tests_color="red"
+            tests_ok="false"
+          fi
+
+          if awk "BEGIN {exit !($coverage >= 80)}"; then
+            coverage_color="brightgreen"
+          elif awk "BEGIN {exit !($coverage >= 60)}"; then
+            coverage_color="yellow"
+          elif awk "BEGIN {exit !($coverage >= 40)}"; then
+            coverage_color="orange"
+          else
+            coverage_color="red"
+          fi
+
+          coverage_badge_value="${coverage}%25"
+          tests_badge="[![Tests passed](https://img.shields.io/badge/Tests-${tests_label}-${tests_color}?labelColor=gray&logo=github)](https://github.com/${{ github.repository }}/actions)"
+          coverage_badge="[![Tests coverage](https://img.shields.io/badge/Tests%20Coverage-${coverage_badge_value}-${coverage_color}?labelColor=gray&logo=gitextensions)](https://github.com/${{ github.repository }}/actions)"
+
+          awk -v tests_line="$tests_badge" -v coverage_line="$coverage_badge" '
+            BEGIN { seen_tests = 0; seen_coverage = 0 }
+            /^\[!\[Tests passed\]/   { $0 = tests_line; seen_tests = 1 }
+            /^\[!\[Tests coverage\]/ { $0 = coverage_line; seen_coverage = 1 }
+            { print }
+            END { if (!seen_tests || !seen_coverage) exit 2 }
+          ' README.md > README.md.tmp
+          mv README.md.tmp README.md
+
+          echo "tests_ok=$tests_ok" >> "$GITHUB_OUTPUT"
+
+      - name: Commit updated badges
+        shell: bash
+        run: |
+          if git diff --quiet -- README.md; then
+            echo "README badges unchanged"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "chore: update test badges"
+          git push
+
+      - name: Fail job if tests failed
+        if: steps.badges.outputs.tests_ok != 'true'
+        shell: bash
+        run: |
+          echo "Tests failed. Badges were updated, but this run is marked failed."
+          exit 1

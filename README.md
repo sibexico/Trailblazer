@@ -3,6 +3,8 @@
  ![MacOS](https://img.shields.io/badge/MasOS-Supported-white?labelColor=gray&logo=apple)
  ![FreeBSD](https://img.shields.io/badge/FreeBSD-Supported-red?labelColor=gray&logo=freebsd)
 
+[![Tests passed](https://img.shields.io/badge/Tests-Unknown-lightgrey?labelColor=gray&logo=github)](https://github.com/sibexico/Trailblazer/actions)
+ [![Tests coverage](https://img.shields.io/badge/Tests%20Coverage-0.0%25-lightgrey?labelColor=gray&logo=gitextensions)](https://github.com/sibexico/Trailblazer/actions)
 
 ![Go Version](https://img.shields.io/badge/Go-1.26.1-blue?labelColor=gray&logo=go)
  [![Go Report Card](https://goreportcard.com/badge/github.com/sibexico/Trailblazer)](https://goreportcard.com/report/github.com/sibexico/Trailblazer)
@@ -56,9 +58,10 @@ trailblazer -h
 - h / l / enter: collapse / expand
 - a / A: add child / root task
 - space: toggle done
-- d / x: delete task
+- d / x: delete selected task (press twice to confirm)
 - n: create version
 - r: set selected task version
+- v: set filter version directly (all or x.y.z)
 - [ / ]: switch filter version
 - 0: clear filter (show all versions)
 - e / E: export parents-only markdown / export full tree markdown

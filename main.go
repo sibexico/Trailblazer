@@ -60,6 +60,7 @@ const (
 	actionAddChild
 	actionNewVersion
 	actionSetVersion
+	actionSetFilterVersion
 	actionInitProjectName
 	actionInitCurrentVersion
 )
@@ -98,6 +99,8 @@ type model struct {
 	inputAction     inputAction
 	inputTargetID   string
 	input           textinput.Model
+	showHelp        bool
+	pendingDeleteID string
 	status          string
 	width           int
 	height          int
@@ -222,6 +225,7 @@ TUI keys:
   d / x                 Delete selected task with children
   n                     Set current version
   r                     Set selected task version
+	v                     Set filter version (all or x.y.z)
   [ / ]                 Cycle version filter
   0                     Clear version filter
   e / E                 Export parents-only/full markdown
@@ -340,6 +344,9 @@ func (m model) handleRuntimeMsg(msg tea.Msg) (model, tea.Cmd, bool) {
 
 func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := k.String()
+	if key != "d" && key != "x" {
+		m.pendingDeleteID = ""
+	}
 	if next, cmd, handled := m.handleNavigationKey(key); handled {
 		return next, cmd
 	}
@@ -360,8 +367,20 @@ func (m model) handleNavigationKey(key string) (model, tea.Cmd, bool) {
 	case "ctrl+c", "q":
 		return m, tea.Quit, true
 	case "?":
-		m.status = shortHelpText()
+		m.showHelp = !m.showHelp
+		if m.showHelp {
+			m.status = "help: press ? or esc to close"
+		} else {
+			m.status = "help closed"
+		}
 		return m, nil, true
+	case "esc":
+		if m.showHelp {
+			m.showHelp = false
+			m.status = "help closed"
+			return m, nil, true
+		}
+		return m, nil, false
 	case "up", "k":
 		m.moveCursor(-1)
 		return m, nil, true
@@ -394,10 +413,17 @@ func (m model) handleTaskEditingKey(key string) (model, tea.Cmd, bool) {
 		if t == nil {
 			return m, nil, true
 		}
+		if m.pendingDeleteID != t.ID {
+			m.pendingDeleteID = t.ID
+			children := countDescendants(t)
+			m.status = fmt.Sprintf("confirm delete: press d again to remove %s (%d subtasks)", t.ID, children)
+			return m, nil, true
+		}
+		m.pendingDeleteID = ""
 		m.deleteCascade(t)
 		m.rebuildVersions()
 		m.rebuildVisible()
-		m.status = "deleted " + t.ID
+		m.status = fmt.Sprintf("deleted %s", t.ID)
 		return m, m.saveCmd(), true
 	case "n":
 		m.startInput(actionNewVersion, "new version", "")
@@ -410,6 +436,13 @@ func (m model) handleTaskEditingKey(key string) (model, tea.Cmd, bool) {
 		m.inputTargetID = t.ID
 		m.startInput(actionSetVersion, "set version (empty clears)", t.Version)
 		return m, nil, true
+	case "v":
+		initial := m.filterVersion
+		if initial == "" {
+			initial = "all"
+		}
+		m.startInput(actionSetFilterVersion, "filter version (all or x.y.z)", initial)
+		return m, nil, true
 	default:
 		return m, nil, false
 	}
@@ -420,14 +453,17 @@ func (m model) handleFilterKey(key string) (model, tea.Cmd, bool) {
 	case "]":
 		m.cycleFilter(1)
 		m.rebuildVisible()
+		m.status = "filter: " + showFilterVersion(m.filterVersion)
 		return m, nil, true
 	case "[":
 		m.cycleFilter(-1)
 		m.rebuildVisible()
+		m.status = "filter: " + showFilterVersion(m.filterVersion)
 		return m, nil, true
 	case "0":
 		m.filterVersion = ""
 		m.rebuildVisible()
+		m.status = "filter: all"
 		return m, nil, true
 	default:
 		return m, nil, false
@@ -490,6 +526,8 @@ func (m *model) commitInput(value string) (tea.Cmd, bool) {
 		return m.commitNewVersion(value)
 	case actionSetVersion:
 		return m.commitSetTaskVersion(value)
+	case actionSetFilterVersion:
+		return m.commitSetFilterVersion(value)
 	case actionInitProjectName:
 		return m.commitInitProjectName(value)
 	case actionInitCurrentVersion:
@@ -500,15 +538,14 @@ func (m *model) commitInput(value string) (tea.Cmd, bool) {
 
 func (m *model) commitAddTask(value string) (tea.Cmd, bool) {
 	if value == "" {
-		m.status = "empty title"
-		return nil, true
+		m.status = "empty title; type a task name or esc to cancel"
+		return nil, false
 	}
 	typeName, title := parseTaskInput(value)
 	if title == "" {
-		m.status = "empty title"
-		return nil, true
+		m.status = "empty title; type a task name or esc to cancel"
+		return nil, false
 	}
-
 	parentID := ""
 	if m.inputAction == actionAddChild {
 		parentID = m.inputTargetID
@@ -538,6 +575,29 @@ func (m *model) commitAddTask(value string) (tea.Cmd, bool) {
 	m.cursorToID(id)
 	m.status = "added " + id
 	return m.saveCmd(), true
+}
+
+func (m *model) commitSetFilterVersion(value string) (tea.Cmd, bool) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" || value == "all" {
+		m.filterVersion = ""
+		m.rebuildVisible()
+		m.status = "filter: all versions"
+		return nil, true
+	}
+	parsed := parseVersionValue(value)
+	if parsed == "" {
+		m.status = "invalid filter version (use all or x.y.z)"
+		return nil, false
+	}
+	if !contains(m.versions, parsed) {
+		m.status = "version not found in project"
+		return nil, false
+	}
+	m.filterVersion = parsed
+	m.rebuildVisible()
+	m.status = "filter: " + parsed
+	return nil, true
 }
 
 func (m *model) commitNewVersion(value string) (tea.Cmd, bool) {
@@ -916,7 +976,10 @@ func exportPathForCSV(csvPath string) string {
 func (m model) View() string {
 	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Project Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
 	body := m.renderBody()
-	footer := faintStyle.Render("q quit | ? help | arrows/j/k move | h/l collapse/expand | a child | A root | d delete | space done | n new version | r set task version | [/ ] cycle filter | 0 clear filter | e export-parents | E export-full")
+	footer := faintStyle.Render("q quit | ? help | arrows/j/k move | a child | A root | d delete(confirm) | space done | n version | r task version | v filter | e/E export")
+	if m.showHelp {
+		body = m.renderHelpPanel()
+	}
 	status := openStyle.Render("status: " + m.status)
 	if m.mode == modeInput {
 		status = cursorStyle.Render("input: ") + m.input.View()
@@ -925,7 +988,24 @@ func (m model) View() string {
 }
 
 func shortHelpText() string {
-	return "keys: a/A add task, space toggle done, d delete, n/r version, [/] filter, e/E export"
+	return "keys: a/A add task, space toggle done, d delete(confirm), n/r version, v or [/] filter, e/E export"
+}
+
+func (m model) renderHelpPanel() string {
+	return strings.Join([]string{
+		"",
+		headerStyle.Render("Help"),
+		"  move: arrows / j / k",
+		"  expand/collapse: h / l / enter",
+		"  add: a child, A root",
+		"  done/open: space",
+		"  delete: d then d to confirm",
+		"  versions: n set project, r set task, v set filter",
+		"  filter quick cycle: [ / ]  | clear: 0",
+		"  export: e parents-only, E full tree",
+		"  close help: ? or esc",
+		"",
+	}, "\n")
 }
 
 func (m model) renderBody() string {
@@ -1282,6 +1362,17 @@ func normalizeType(t string) string {
 	default:
 		return "feature"
 	}
+}
+
+func countDescendants(t *task) int {
+	if t == nil {
+		return 0
+	}
+	total := len(t.Children)
+	for _, c := range t.Children {
+		total += countDescendants(c)
+	}
+	return total
 }
 
 func normalizeStatus(s string) string {

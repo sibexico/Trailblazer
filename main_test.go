@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestParseCLIArgs(t *testing.T) {
@@ -320,6 +322,103 @@ func TestCommitSetTaskVersionValidation(t *testing.T) {
 	}
 	if taskNode.Version != "" {
 		t.Fatalf("expected cleared task version")
+	}
+}
+
+func TestCommitAddTaskEmptyKeepsInputOpen(t *testing.T) {
+	m := model{tasksByID: map[string]*task{}, roots: []*task{}, inputAction: actionAddRoot}
+	cmd, closeInput := m.commitAddTask("")
+	if closeInput {
+		t.Fatalf("empty title should keep input open")
+	}
+	if cmd != nil {
+		t.Fatalf("empty title should not return save cmd")
+	}
+	if !strings.Contains(m.status, "empty title") {
+		t.Fatalf("expected empty-title status, got %q", m.status)
+	}
+}
+
+func TestDeleteRequiresConfirmation(t *testing.T) {
+	child := &task{ID: "T2", ParentID: "T1", Status: "open", Title: "child", Expanded: true}
+	root := &task{ID: "T1", Status: "open", Title: "root", Expanded: true, Children: []*task{child}}
+	m := model{tasksByID: map[string]*task{"T1": root, "T2": child}, roots: []*task{root}}
+	m.rebuildVisible()
+
+	m1, cmd, handled := m.handleTaskEditingKey("d")
+	if !handled {
+		t.Fatalf("delete key should be handled")
+	}
+	if cmd != nil {
+		t.Fatalf("first delete press must not save")
+	}
+	if m1.pendingDeleteID != "T1" {
+		t.Fatalf("expected pending delete for T1, got %q", m1.pendingDeleteID)
+	}
+	if len(m1.tasksByID) != 2 {
+		t.Fatalf("tasks should remain until confirmation")
+	}
+
+	m2, cmd, handled := m1.handleTaskEditingKey("d")
+	if !handled {
+		t.Fatalf("second delete key should be handled")
+	}
+	if cmd == nil {
+		t.Fatalf("second delete press must return save cmd")
+	}
+	if len(m2.tasksByID) != 0 || len(m2.roots) != 0 {
+		t.Fatalf("expected cascade delete after confirmation")
+	}
+}
+
+func TestHandleKeyClearsPendingDeleteOnOtherKey(t *testing.T) {
+	root := &task{ID: "T1", Status: "open", Title: "root", Expanded: true}
+	m := model{tasksByID: map[string]*task{"T1": root}, roots: []*task{root}, pendingDeleteID: "T1"}
+	m.rebuildVisible()
+
+	next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	nm := next.(model)
+	if nm.pendingDeleteID != "" {
+		t.Fatalf("non-delete key should clear pending delete")
+	}
+}
+
+func TestHelpToggleAndClose(t *testing.T) {
+	m := model{}
+	m1, _, handled := m.handleNavigationKey("?")
+	if !handled || !m1.showHelp {
+		t.Fatalf("expected help to open on ?")
+	}
+	m2, _, handled := m1.handleNavigationKey("esc")
+	if !handled || m2.showHelp {
+		t.Fatalf("expected help to close on esc")
+	}
+}
+
+func TestCommitSetFilterVersionValidation(t *testing.T) {
+	root1 := &task{ID: "T1", Version: "1.0.0", Status: "open", Title: "one", Expanded: true}
+	root2 := &task{ID: "T2", Version: "1.1.0", Status: "open", Title: "two", Expanded: true}
+	m := model{tasksByID: map[string]*task{"T1": root1, "T2": root2}, roots: []*task{root1, root2}, versions: []string{"1.0.0", "1.1.0"}}
+	m.rebuildVisible()
+
+	cmd, closeInput := m.commitSetFilterVersion("all")
+	if cmd != nil || !closeInput || m.filterVersion != "" {
+		t.Fatalf("expected all filter to clear and close")
+	}
+
+	cmd, closeInput = m.commitSetFilterVersion("invalid")
+	if cmd != nil || closeInput {
+		t.Fatalf("invalid filter should keep input open and not save")
+	}
+
+	cmd, closeInput = m.commitSetFilterVersion("2.0.0")
+	if cmd != nil || closeInput {
+		t.Fatalf("unknown version should keep input open and not save")
+	}
+
+	cmd, closeInput = m.commitSetFilterVersion("v1.1.0")
+	if cmd != nil || !closeInput || m.filterVersion != "1.1.0" {
+		t.Fatalf("expected normalized known version to be applied")
 	}
 }
 
