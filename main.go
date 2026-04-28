@@ -48,6 +48,7 @@ type mode int
 const (
 	modeNormal mode = iota
 	modeInput
+	modePicker
 )
 
 const versionPollInterval = 2 * time.Second
@@ -99,8 +100,16 @@ type model struct {
 	inputAction     inputAction
 	inputTargetID   string
 	input           textinput.Model
+	pickerTitle     string
+	pickerOptions   []string
+	pickerIndex     int
+	pickerAction    inputAction
 	showHelp        bool
 	pendingDeleteID string
+	undoRows        []taskRow
+	undoSelectedID  string
+	undoDeletedID   string
+	undoDeletedSize int
 	status          string
 	width           int
 	height          int
@@ -223,9 +232,10 @@ TUI keys:
   a / A                 Add child/root task
   space                 Toggle done/open
   d / x                 Delete selected task with children
+	u                     Undo last delete
   n                     Set current version
   r                     Set selected task version
-	v                     Set filter version (all or x.y.z)
+	v                     Pick filter version from menu
   [ / ]                 Cycle version filter
   0                     Clear version filter
   e / E                 Export parents-only/full markdown
@@ -279,6 +289,9 @@ func (m model) Init() tea.Cmd { return m.pollVersionCmd() }
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, handled := m.handleRuntimeMsg(msg); handled {
 		return next, cmd
+	}
+	if m.mode == modePicker {
+		return m.updatePicker(msg)
 	}
 
 	if m.mode == modeInput {
@@ -344,7 +357,7 @@ func (m model) handleRuntimeMsg(msg tea.Msg) (model, tea.Cmd, bool) {
 
 func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := k.String()
-	if key != "d" && key != "x" {
+	if key != "d" && key != "x" && key != "u" {
 		m.pendingDeleteID = ""
 	}
 	if next, cmd, handled := m.handleNavigationKey(key); handled {
@@ -419,12 +432,18 @@ func (m model) handleTaskEditingKey(key string) (model, tea.Cmd, bool) {
 			m.status = fmt.Sprintf("confirm delete: press d again to remove %s (%d subtasks)", t.ID, children)
 			return m, nil, true
 		}
+		m.undoRows = append([]taskRow(nil), flattenRows(m.roots)...)
+		m.undoSelectedID = m.selectedID()
+		m.undoDeletedID = t.ID
+		m.undoDeletedSize = countDescendants(t) + 1
 		m.pendingDeleteID = ""
 		m.deleteCascade(t)
 		m.rebuildVersions()
 		m.rebuildVisible()
-		m.status = fmt.Sprintf("deleted %s", t.ID)
+		m.status = fmt.Sprintf("deleted %s (%d tasks); press u to undo", t.ID, m.undoDeletedSize)
 		return m, m.saveCmd(), true
+	case "u":
+		return m, m.undoDeleteCmd(), true
 	case "n":
 		m.startInput(actionNewVersion, "new version", "")
 		return m, nil, true
@@ -437,11 +456,14 @@ func (m model) handleTaskEditingKey(key string) (model, tea.Cmd, bool) {
 		m.startInput(actionSetVersion, "set version (empty clears)", t.Version)
 		return m, nil, true
 	case "v":
-		initial := m.filterVersion
-		if initial == "" {
-			initial = "all"
+		options := make([]string, 0, len(m.versions)+1)
+		options = append(options, "all")
+		options = append(options, m.versions...)
+		selected := m.filterVersion
+		if selected == "" {
+			selected = "all"
 		}
-		m.startInput(actionSetFilterVersion, "filter version (all or x.y.z)", initial)
+		m.startPicker(actionSetFilterVersion, "filter version", options, selected)
 		return m, nil, true
 	default:
 		return m, nil, false
@@ -518,6 +540,50 @@ func (m model) updateInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, isKey := msg.(tea.KeyMsg)
+	if !isKey {
+		return m, nil
+	}
+	switch k.String() {
+	case "esc":
+		m.mode = modeNormal
+		m.pickerOptions = nil
+		m.pickerTitle = ""
+		m.pickerIndex = 0
+		m.pickerAction = actionNone
+		m.status = "cancelled"
+		return m, nil
+	case "up", "k":
+		if len(m.pickerOptions) > 0 {
+			m.pickerIndex = (m.pickerIndex - 1 + len(m.pickerOptions)) % len(m.pickerOptions)
+		}
+		return m, nil
+	case "down", "j":
+		if len(m.pickerOptions) > 0 {
+			m.pickerIndex = (m.pickerIndex + 1) % len(m.pickerOptions)
+		}
+		return m, nil
+	case "enter":
+		if len(m.pickerOptions) == 0 {
+			m.mode = modeNormal
+			return m, nil
+		}
+		choice := m.pickerOptions[m.pickerIndex]
+		cmd, closePicker := m.commitPicker(choice)
+		if closePicker {
+			m.mode = modeNormal
+			m.pickerOptions = nil
+			m.pickerTitle = ""
+			m.pickerIndex = 0
+			m.pickerAction = actionNone
+		}
+		return m, cmd
+	default:
+		return m, nil
+	}
+}
+
 func (m *model) commitInput(value string) (tea.Cmd, bool) {
 	switch m.inputAction {
 	case actionAddRoot, actionAddChild:
@@ -534,6 +600,15 @@ func (m *model) commitInput(value string) (tea.Cmd, bool) {
 		return m.commitInitCurrentVersion(value)
 	}
 	return nil, true
+}
+
+func (m *model) commitPicker(choice string) (tea.Cmd, bool) {
+	switch m.pickerAction {
+	case actionSetFilterVersion:
+		return m.commitSetFilterVersion(choice)
+	default:
+		return nil, true
+	}
 }
 
 func (m *model) commitAddTask(value string) (tea.Cmd, bool) {
@@ -676,6 +751,20 @@ func (m *model) startInput(a inputAction, prompt string, initial string) {
 	m.input.Focus()
 }
 
+func (m *model) startPicker(a inputAction, title string, options []string, selected string) {
+	m.mode = modePicker
+	m.pickerAction = a
+	m.pickerTitle = title
+	m.pickerOptions = append([]string(nil), options...)
+	m.pickerIndex = 0
+	for i, opt := range m.pickerOptions {
+		if opt == selected {
+			m.pickerIndex = i
+			break
+		}
+	}
+}
+
 func (m *model) selected() *task {
 	if m.cursor < 0 || m.cursor >= len(m.visible) {
 		return nil
@@ -716,6 +805,28 @@ func (m *model) toggleSelectedDoneCmd() tea.Cmd {
 		t.Status = "done"
 	}
 	m.rebuildVisible()
+	return m.saveCmd()
+}
+
+func (m *model) undoDeleteCmd() tea.Cmd {
+	if len(m.undoRows) == 0 {
+		m.status = "nothing to undo"
+		return nil
+	}
+	rows := append([]taskRow(nil), m.undoRows...)
+	byID := buildTaskIndex(rows)
+	m.roots = buildTaskTree(rows, byID)
+	m.tasksByID = byID
+	m.rebuildVersions()
+	m.rebuildVisible()
+	if m.undoSelectedID != "" {
+		m.cursorToID(m.undoSelectedID)
+	}
+	m.status = fmt.Sprintf("undo: restored %s (%d tasks)", m.undoDeletedID, m.undoDeletedSize)
+	m.undoRows = nil
+	m.undoSelectedID = ""
+	m.undoDeletedID = ""
+	m.undoDeletedSize = 0
 	return m.saveCmd()
 }
 
@@ -976,7 +1087,10 @@ func exportPathForCSV(csvPath string) string {
 func (m model) View() string {
 	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Project Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
 	body := m.renderBody()
-	footer := faintStyle.Render("q quit | ? help | arrows/j/k move | a child | A root | d delete(confirm) | space done | n version | r task version | v filter | e/E export")
+	if m.mode == modePicker {
+		body = m.renderPickerPanel()
+	}
+	footer := faintStyle.Render(m.footerText())
 	if m.showHelp {
 		body = m.renderHelpPanel()
 	}
@@ -987,8 +1101,33 @@ func (m model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer, status)
 }
 
+func (m model) footerText() string {
+	if m.mode == modeInput {
+		return "enter submit | esc cancel | ? help"
+	}
+	if m.mode == modePicker {
+		return "up/down or j/k select | enter apply | esc cancel"
+	}
+	if m.showHelp {
+		return "? close help | q quit"
+	}
+	parts := []string{
+		"q quit",
+		"? help",
+		"arrows/j/k move",
+		"a child",
+		"A root",
+		"d delete(confirm)",
+	}
+	if len(m.undoRows) > 0 {
+		parts = append(parts, "u undo")
+	}
+	parts = append(parts, "space done", "n version", "r task version", "v filter", "e/E export")
+	return strings.Join(parts, " | ")
+}
+
 func shortHelpText() string {
-	return "keys: a/A add task, space toggle done, d delete(confirm), n/r version, v or [/] filter, e/E export"
+	return "keys: a/A add task, d delete(confirm), u undo delete, space done, n/r version, v picker or [/] filter, e/E export"
 }
 
 func (m model) renderHelpPanel() string {
@@ -1000,7 +1139,9 @@ func (m model) renderHelpPanel() string {
 		"  add: a child, A root",
 		"  done/open: space",
 		"  delete: d then d to confirm",
+		"  undo delete: u",
 		"  versions: n set project, r set task, v set filter",
+		"  picker controls: up/down or j/k, enter apply, esc cancel",
 		"  filter quick cycle: [ / ]  | clear: 0",
 		"  export: e parents-only, E full tree",
 		"  close help: ? or esc",
@@ -1008,9 +1149,37 @@ func (m model) renderHelpPanel() string {
 	}, "\n")
 }
 
+func (m model) renderPickerPanel() string {
+	if len(m.pickerOptions) == 0 {
+		return "\n(no options)\n"
+	}
+	lines := []string{"", headerStyle.Render("Select " + m.pickerTitle)}
+	for i, opt := range m.pickerOptions {
+		line := "  " + opt
+		if i == m.pickerIndex {
+			line = cursorStyle.Render("> ") + opt
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, "")
+	return strings.Join(lines, "\n")
+}
+
 func (m model) renderBody() string {
 	if len(m.visible) == 0 {
-		return "\n(no tasks; press A for root task)\n"
+		if m.currentVersion == "" {
+			return strings.Join([]string{
+				"",
+				"No tasks yet.",
+				"Quick start:",
+				"  1. Press A to add a root task",
+				"  2. Press n to set project version",
+				"  3. Press e or E to export roadmap",
+				"Press ? for full key help.",
+				"",
+			}, "\n")
+		}
+		return "\n(no tasks yet; press A for root task, ? for help)\n"
 	}
 	lines := make([]string, 0, len(m.visible)+2)
 	for i, v := range m.visible {

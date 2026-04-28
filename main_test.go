@@ -371,6 +371,48 @@ func TestDeleteRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestUndoDeleteRestoresTree(t *testing.T) {
+	child := &task{ID: "T2", ParentID: "T1", Status: "open", Title: "child", Expanded: true}
+	root := &task{ID: "T1", Status: "open", Title: "root", Expanded: true, Children: []*task{child}}
+	m := model{tasksByID: map[string]*task{"T1": root, "T2": child}, roots: []*task{root}}
+	m.rebuildVisible()
+
+	m1, _, _ := m.handleTaskEditingKey("d")
+	m2, _, _ := m1.handleTaskEditingKey("d")
+	if len(m2.tasksByID) != 0 {
+		t.Fatalf("expected deleted tree before undo")
+	}
+
+	m3, cmd, handled := m2.handleTaskEditingKey("u")
+	if !handled {
+		t.Fatalf("undo key should be handled")
+	}
+	if cmd == nil {
+		t.Fatalf("undo should trigger save")
+	}
+	if len(m3.tasksByID) != 2 || len(m3.roots) != 1 {
+		t.Fatalf("expected original tree restored on undo")
+	}
+	if m3.undoRows != nil {
+		t.Fatalf("undo buffer should be cleared after undo")
+	}
+}
+
+func TestUndoWithoutDeleteShowsStatus(t *testing.T) {
+	m := model{tasksByID: map[string]*task{}, roots: []*task{}}
+	next, cmd, handled := m.handleTaskEditingKey("u")
+	if !handled {
+		t.Fatalf("undo key should be handled")
+	}
+	if cmd != nil {
+		t.Fatalf("undo without snapshot should not save")
+	}
+	nm := next
+	if !strings.Contains(nm.status, "nothing to undo") {
+		t.Fatalf("expected nothing-to-undo status, got %q", nm.status)
+	}
+}
+
 func TestHandleKeyClearsPendingDeleteOnOtherKey(t *testing.T) {
 	root := &task{ID: "T1", Status: "open", Title: "root", Expanded: true}
 	m := model{tasksByID: map[string]*task{"T1": root}, roots: []*task{root}, pendingDeleteID: "T1"}
@@ -392,6 +434,84 @@ func TestHelpToggleAndClose(t *testing.T) {
 	m2, _, handled := m1.handleNavigationKey("esc")
 	if !handled || m2.showHelp {
 		t.Fatalf("expected help to close on esc")
+	}
+}
+
+func TestFooterTextByModeAndUndo(t *testing.T) {
+	m := model{}
+	if got := m.footerText(); !strings.Contains(got, "d delete(confirm)") {
+		t.Fatalf("normal footer missing delete hint: %q", got)
+	}
+
+	m.mode = modeInput
+	if got := m.footerText(); !strings.Contains(got, "enter submit") {
+		t.Fatalf("input footer missing submit hint: %q", got)
+	}
+
+	m.mode = modeNormal
+	m.showHelp = true
+	if got := m.footerText(); !strings.Contains(got, "close help") {
+		t.Fatalf("help footer missing close hint: %q", got)
+	}
+
+	m.showHelp = false
+	m.mode = modePicker
+	if got := m.footerText(); !strings.Contains(got, "enter apply") {
+		t.Fatalf("picker footer missing apply hint: %q", got)
+	}
+
+	m.showHelp = false
+	m.mode = modeNormal
+	m.undoRows = []taskRow{{ID: "T1"}}
+	if got := m.footerText(); !strings.Contains(got, "u undo") {
+		t.Fatalf("footer should include undo when snapshot exists: %q", got)
+	}
+}
+
+func TestVersionPickerOpenNavigateApply(t *testing.T) {
+	root1 := &task{ID: "T1", Version: "1.0.0", Status: "open", Title: "one", Expanded: true}
+	root2 := &task{ID: "T2", Version: "1.1.0", Status: "open", Title: "two", Expanded: true}
+	m := model{tasksByID: map[string]*task{"T1": root1, "T2": root2}, roots: []*task{root1, root2}, versions: []string{"1.0.0", "1.1.0"}}
+	m.rebuildVisible()
+
+	m1, _, handled := m.handleTaskEditingKey("v")
+	if !handled {
+		t.Fatalf("v should open picker")
+	}
+	if m1.mode != modePicker {
+		t.Fatalf("expected picker mode after v")
+	}
+	if len(m1.pickerOptions) != 3 || m1.pickerOptions[0] != "all" {
+		t.Fatalf("unexpected picker options: %#v", m1.pickerOptions)
+	}
+
+	next, _ := m1.updatePicker(tea.KeyMsg{Type: tea.KeyDown})
+	m2 := next.(model)
+	if m2.pickerIndex != 1 {
+		t.Fatalf("expected picker index 1 after down, got %d", m2.pickerIndex)
+	}
+
+	next, _ = m2.updatePicker(tea.KeyMsg{Type: tea.KeyEnter})
+	m3 := next.(model)
+	if m3.mode != modeNormal {
+		t.Fatalf("expected return to normal mode after apply")
+	}
+	if m3.filterVersion != "1.0.0" {
+		t.Fatalf("expected picked filter 1.0.0, got %q", m3.filterVersion)
+	}
+}
+
+func TestVersionPickerCancel(t *testing.T) {
+	m := model{versions: []string{"1.0.0"}}
+	m.startPicker(actionSetFilterVersion, "filter version", []string{"all", "1.0.0"}, "all")
+
+	next, _ := m.updatePicker(tea.KeyMsg{Type: tea.KeyEsc})
+	nm := next.(model)
+	if nm.mode != modeNormal {
+		t.Fatalf("expected normal mode after cancel")
+	}
+	if nm.pickerOptions != nil {
+		t.Fatalf("expected picker options cleared on cancel")
 	}
 }
 
