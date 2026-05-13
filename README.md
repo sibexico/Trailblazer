@@ -4,7 +4,7 @@
  ![FreeBSD](https://img.shields.io/badge/FreeBSD-Supported-red?labelColor=gray&logo=freebsd)
 
 [![Tests passed](https://img.shields.io/badge/Tests-Passed-green?labelColor=gray&logo=github)](https://github.com/sibexico/Trailblazer/actions)
-[![Tests coverage](https://img.shields.io/badge/Tests%20Coverage-52.3%25-yellow?labelColor=gray&logo=gitextensions)](https://github.com/sibexico/Trailblazer/actions)
+[![Tests coverage](https://img.shields.io/badge/Tests%20Coverage-72.4%25-green?labelColor=gray&logo=gitextensions)](https://github.com/sibexico/Trailblazer/actions)
 
 ![Go Version](https://img.shields.io/badge/Go-1.26.1-blue?labelColor=gray&logo=go)
  [![Go Report Card](https://goreportcard.com/badge/github.com/sibexico/Trailblazer)](https://goreportcard.com/report/github.com/sibexico/Trailblazer)
