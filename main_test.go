@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -183,15 +185,15 @@ func TestWriteRowsAndLoadCSVRoundTrip(t *testing.T) {
 	path := filepath.Join(tmp, "trailblazer.csv")
 
 	rows1 := []taskRow{
-		{ID: "T1", ParentID: "", Version: "1.0.0", Type: "feature", Status: "open", Title: "root"},
-		{ID: "T2", ParentID: "T1", Version: "1.0.0", Type: "bugfix", Status: "done", Title: "child"},
+		{ID: "T1", ParentID: "", Version: "1.0.0", Type: "feature", Status: "open", Title: "root", Description: "root description"},
+		{ID: "T2", ParentID: "T1", Version: "1.0.0", Type: "bugfix", Status: "done", Title: "child", Description: "child description"},
 	}
 	if err := writeRows(path, rows1); err != nil {
 		t.Fatalf("writeRows rows1 error: %v", err)
 	}
 
 	// Overwrite to exercise replace path and keep CSV consistent.
-	rows2 := []taskRow{{ID: "T3", ParentID: "", Version: "2.0.0", Type: "improvement", Status: "open", Title: "new root"}}
+	rows2 := []taskRow{{ID: "T3", ParentID: "", Version: "2.0.0", Type: "improvement", Status: "open", Title: "new root", Description: "new description"}}
 	if err := writeRows(path, rows2); err != nil {
 		t.Fatalf("writeRows rows2 error: %v", err)
 	}
@@ -205,6 +207,9 @@ func TestWriteRowsAndLoadCSVRoundTrip(t *testing.T) {
 	}
 	if roots[0].ID != "T3" {
 		t.Fatalf("expected root T3, got %q", roots[0].ID)
+	}
+	if roots[0].Description != "new description" {
+		t.Fatalf("expected persisted description, got %q", roots[0].Description)
 	}
 }
 
@@ -325,6 +330,61 @@ func TestCommitSetTaskVersionValidation(t *testing.T) {
 	}
 }
 
+func TestCommitDescriptionSavesAndClears(t *testing.T) {
+	taskNode := &task{ID: "T1", Version: "1.0.0", Status: "open", Title: "task", Expanded: true}
+	m := model{tasksByID: map[string]*task{"T1": taskNode}, roots: []*task{taskNode}, descriptionTargetID: "T1"}
+	m.rebuildVisible()
+
+	cmd, closeEditor := m.commitDescription("line one\nline two")
+	if !closeEditor {
+		t.Fatalf("description save should close editor")
+	}
+	if cmd == nil {
+		t.Fatalf("description save should return save cmd")
+	}
+	if taskNode.Description != "line one\nline two" {
+		t.Fatalf("expected saved description, got %q", taskNode.Description)
+	}
+
+	cmd, closeEditor = m.commitDescription("   ")
+	if !closeEditor || cmd == nil {
+		t.Fatalf("description clear should close editor and save")
+	}
+	if taskNode.Description != "" {
+		t.Fatalf("expected cleared description")
+	}
+}
+
+func TestDescriptionHotkeyOpensModal(t *testing.T) {
+	taskNode := &task{ID: "T1", Status: "open", Title: "task", Expanded: true, Description: "existing"}
+	m := model{tasksByID: map[string]*task{"T1": taskNode}, roots: []*task{taskNode}, descriptionInput: textarea.New()}
+	m.rebuildVisible()
+
+	next, _, handled := m.handleTaskEditingKey("t")
+	if !handled {
+		t.Fatalf("t key should be handled")
+	}
+	if next.mode != modeDescription {
+		t.Fatalf("expected modeDescription after t key")
+	}
+	if next.descriptionTargetID != "T1" {
+		t.Fatalf("expected description target T1, got %q", next.descriptionTargetID)
+	}
+	if next.descriptionInput.Value() != "existing" {
+		t.Fatalf("expected prefilled description")
+	}
+}
+
+func TestRenderBodyShowsDescriptionBelowTask(t *testing.T) {
+	taskNode := &task{ID: "T1", Version: "1.0.0", Status: "open", Title: "task", Description: "details line", Expanded: true}
+	m := model{tasksByID: map[string]*task{"T1": taskNode}, roots: []*task{taskNode}}
+	m.rebuildVisible()
+	out := m.renderBody()
+	if !strings.Contains(out, "details line") {
+		t.Fatalf("expected description line in renderBody output")
+	}
+}
+
 func TestCommitAddTaskEmptyKeepsInputOpen(t *testing.T) {
 	m := model{tasksByID: map[string]*task{}, roots: []*task{}, inputAction: actionAddRoot}
 	cmd, closeInput := m.commitAddTask("")
@@ -441,6 +501,9 @@ func TestFooterTextByModeAndUndo(t *testing.T) {
 	m := model{}
 	if got := m.footerText(); !strings.Contains(got, "d delete(confirm)") {
 		t.Fatalf("normal footer missing delete hint: %q", got)
+	}
+	if got := m.footerText(); !strings.Contains(got, "t description") {
+		t.Fatalf("normal footer missing description hint: %q", got)
 	}
 
 	m.mode = modeInput
@@ -637,5 +700,192 @@ func TestFlattenRowsOrder(t *testing.T) {
 	ids := []string{rows[0].ID, rows[1].ID, rows[2].ID}
 	if !reflect.DeepEqual(ids, []string{"R", "C1", "C2"}) {
 		t.Fatalf("unexpected flatten order: %v", ids)
+	}
+}
+
+func TestNewModelExistingAndNewProject(t *testing.T) {
+	tmp := t.TempDir()
+	csvPath := filepath.Join(tmp, "trailblazer.csv")
+	rows := []taskRow{{ID: "T1", ParentID: "", Version: "1.0.0", Type: "feature", Status: "open", Title: "root"}}
+	if err := writeRows(csvPath, rows); err != nil {
+		t.Fatalf("writeRows: %v", err)
+	}
+	if err := writeVersionFile(tmp, "1.2.3"); err != nil {
+		t.Fatalf("writeVersionFile: %v", err)
+	}
+
+	m, err := newModel(csvPath)
+	if err != nil {
+		t.Fatalf("newModel(existing) error: %v", err)
+	}
+	if m.currentVersion != "1.2.3" {
+		t.Fatalf("expected currentVersion from VERSION file, got %q", m.currentVersion)
+	}
+	if len(m.roots) != 1 || len(m.tasksByID) != 1 {
+		t.Fatalf("expected loaded existing tasks")
+	}
+
+	newCSV := filepath.Join(tmp, "brand_new.csv")
+	m2, err := newModel(newCSV)
+	if err != nil {
+		t.Fatalf("newModel(new project) error: %v", err)
+	}
+	if m2.mode != modeInput || m2.inputAction != actionInitProjectName {
+		t.Fatalf("expected new project setup input mode")
+	}
+}
+
+func TestRuntimeAndUpdateRouting(t *testing.T) {
+	tmp := t.TempDir()
+	m := model{csvPath: filepath.Join(tmp, "trailblazer.csv")}
+
+	m1, _, handled := m.handleRuntimeMsg(saveDoneMsg{err: nil})
+	if !handled || !strings.Contains(m1.status, "saved") {
+		t.Fatalf("expected saveDone handled status")
+	}
+	m2, _, handled := m.handleRuntimeMsg(exportDoneMsg{path: filepath.Join(tmp, "trailblazer.md")})
+	if !handled || !strings.Contains(m2.status, "exported") {
+		t.Fatalf("expected exportDone handled status")
+	}
+	_, _, handled = m.handleRuntimeMsg(tea.WindowSizeMsg{Width: 100, Height: 40})
+	if !handled {
+		t.Fatalf("expected window size message handled")
+	}
+
+	m.mode = modePicker
+	m.pickerOptions = []string{"all", "1.0.0"}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if next.(model).pickerIndex != 1 {
+		t.Fatalf("expected picker branch in Update")
+	}
+
+	m.mode = modeDescription
+	m.descriptionInput = textarea.New()
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if next.(model).mode != modeNormal {
+		t.Fatalf("expected description branch in Update")
+	}
+}
+
+func TestInputDescriptionAndInitFlows(t *testing.T) {
+	taskNode := &task{ID: "T1", Status: "open", Title: "root", Expanded: true}
+	m := model{tasksByID: map[string]*task{"T1": taskNode}, roots: []*task{taskNode}, input: textinput.New(), descriptionInput: textarea.New()}
+	m.rebuildVisible()
+
+	m.startInput(actionNewVersion, "new version", "1.2.3")
+	next, _ := m.updateInput(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if nm.currentVersion != "1.2.3" || nm.mode != modeNormal {
+		t.Fatalf("expected enter to commit new version and close input")
+	}
+
+	m.startDescriptionEditor(taskNode)
+	m.descriptionInput.SetValue("details")
+	next, _ = m.updateDescription(tea.KeyMsg{Type: tea.KeyCtrlS})
+	nm = next.(model)
+	if nm.mode != modeNormal || taskNode.Description != "details" {
+		t.Fatalf("expected ctrl+s to save description")
+	}
+
+	m2 := model{input: textinput.New()}
+	cmd, closeInput := m2.commitInitProjectName("demo")
+	if closeInput || cmd != nil || m2.inputAction != actionInitCurrentVersion {
+		t.Fatalf("expected init project name to open version step")
+	}
+	cmd, closeInput = m2.commitInitCurrentVersion("1.0.0")
+	if !closeInput || cmd == nil || m2.currentVersion != "1.0.0" {
+		t.Fatalf("expected init current version to complete and save")
+	}
+}
+
+func TestExportFilterAndSyncFunctions(t *testing.T) {
+	tmp := t.TempDir()
+	csvPath := filepath.Join(tmp, "trailblazer.csv")
+	root := &task{ID: "T1", Status: "open", Title: "root", Expanded: true, Type: "feature", Version: "1.0.0"}
+	m := model{csvPath: csvPath, tasksByID: map[string]*task{"T1": root}, roots: []*task{root}, versions: []string{"1.0.0", "1.1.0"}, currentVersion: "1.0.0"}
+	m.rebuildVisible()
+
+	if err := writeRows(csvPath, flattenRows(m.roots)); err != nil {
+		t.Fatalf("writeRows: %v", err)
+	}
+
+	m2, _, handled := m.handleFilterKey("]")
+	if !handled || m2.filterVersion == "" {
+		t.Fatalf("expected filter cycle to set version")
+	}
+
+	m3, cmd, handled := m.handleExportKey("e")
+	if !handled || cmd == nil {
+		t.Fatalf("expected export key handled with cmd")
+	}
+	msg := cmd()
+	if _, ok := msg.(exportDoneMsg); !ok {
+		t.Fatalf("expected exportDoneMsg, got %T", msg)
+	}
+	if m3.exportNow(true) != nil {
+		t.Fatalf("expected exportNow success")
+	}
+
+	if err := writeVersionFile(tmp, "1.1.0"); err != nil {
+		t.Fatalf("writeVersionFile: %v", err)
+	}
+	if err := m.syncCurrentVersionFromFile(); err != nil {
+		t.Fatalf("syncCurrentVersionFromFile error: %v", err)
+	}
+	if m.currentVersion != "1.1.0" {
+		t.Fatalf("expected synced current version, got %q", m.currentVersion)
+	}
+}
+
+func TestRenderAndHelperCoverage(t *testing.T) {
+	taskNode := &task{ID: "T1", Status: "open", Title: "root", Expanded: true, Type: "bugfix"}
+	m := model{projectName: "demo", csvPath: "trailblazer.csv", tasksByID: map[string]*task{"T1": taskNode}, roots: []*task{taskNode}, descriptionInput: textarea.New()}
+	m.rebuildVisible()
+
+	_ = newTaskID()
+	if !strings.Contains(typeTag("bugfix"), "B") {
+		t.Fatalf("expected bugfix tag")
+	}
+
+	m.setSelectedExpanded(false)
+	if taskNode.Expanded {
+		t.Fatalf("expected collapsed selected task")
+	}
+	taskNode.Expanded = true
+	if cmd := m.toggleSelectedDoneCmd(); cmd == nil {
+		t.Fatalf("expected toggleSelectedDoneCmd save cmd")
+	}
+
+	m.mode = modeNormal
+	view := m.View()
+	if !strings.Contains(view, "Project:") {
+		t.Fatalf("expected View header")
+	}
+	if !strings.Contains(m.renderHelpPanel(), "Help") {
+		t.Fatalf("expected help panel content")
+	}
+	m.mode = modePicker
+	m.pickerTitle = "filter"
+	m.pickerOptions = []string{"all", "1.0.0"}
+	if !strings.Contains(m.renderPickerPanel(), "Select") {
+		t.Fatalf("expected picker panel content")
+	}
+	m.mode = modeDescription
+	if !strings.Contains(m.renderDescriptionModal(), "Task description") {
+		t.Fatalf("expected description modal content")
+	}
+
+	if exportPathForCSV(filepath.Join("x", "trailblazer.csv")) != filepath.Join("x", "trailblazer.md") {
+		t.Fatalf("unexpected export path")
+	}
+
+	if m.pollVersionCmd() == nil {
+		t.Fatalf("expected pollVersionCmd")
+	}
+	if msg := m.writeVersionFileCmd("1.2.3")(); msg == nil {
+		t.Fatalf("expected version write cmd message")
+	}
+	if msg := m.exportCmd(false)(); msg == nil {
+		t.Fatalf("expected export cmd message")
 	}
 }

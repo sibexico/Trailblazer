@@ -12,29 +12,32 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type task struct {
-	ID       string
-	ParentID string
-	Version  string
-	Type     string
-	Status   string
-	Title    string
-	Expanded bool
-	Children []*task
+	ID          string
+	ParentID    string
+	Version     string
+	Type        string
+	Status      string
+	Title       string
+	Description string
+	Expanded    bool
+	Children    []*task
 }
 
 type taskRow struct {
-	ID       string
-	ParentID string
-	Version  string
-	Type     string
-	Status   string
-	Title    string
+	ID          string
+	ParentID    string
+	Version     string
+	Type        string
+	Status      string
+	Title       string
+	Description string
 }
 
 type visibleTask struct {
@@ -49,6 +52,7 @@ const (
 	modeNormal mode = iota
 	modeInput
 	modePicker
+	modeDescription
 )
 
 const versionPollInterval = 2 * time.Second
@@ -86,33 +90,35 @@ type versionFileWriteDoneMsg struct {
 }
 
 type model struct {
-	projectName     string
-	csvPath         string
-	tasksByID       map[string]*task
-	roots           []*task
-	visible         []visibleTask
-	cursor          int
-	currentVersion  string
-	filterVersion   string
-	lastVersionFile string
-	versions        []string
-	mode            mode
-	inputAction     inputAction
-	inputTargetID   string
-	input           textinput.Model
-	pickerTitle     string
-	pickerOptions   []string
-	pickerIndex     int
-	pickerAction    inputAction
-	showHelp        bool
-	pendingDeleteID string
-	undoRows        []taskRow
-	undoSelectedID  string
-	undoDeletedID   string
-	undoDeletedSize int
-	status          string
-	width           int
-	height          int
+	projectName         string
+	csvPath             string
+	tasksByID           map[string]*task
+	roots               []*task
+	visible             []visibleTask
+	cursor              int
+	currentVersion      string
+	filterVersion       string
+	lastVersionFile     string
+	versions            []string
+	mode                mode
+	inputAction         inputAction
+	inputTargetID       string
+	input               textinput.Model
+	descriptionInput    textarea.Model
+	descriptionTargetID string
+	pickerTitle         string
+	pickerOptions       []string
+	pickerIndex         int
+	pickerAction        inputAction
+	showHelp            bool
+	pendingDeleteID     string
+	undoRows            []taskRow
+	undoSelectedID      string
+	undoDeletedID       string
+	undoDeletedSize     int
+	status              string
+	width               int
+	height              int
 }
 
 var (
@@ -233,6 +239,7 @@ TUI keys:
   space                 Toggle done/open
   d / x                 Delete selected task with children
 	u                     Undo last delete
+	t                     Edit selected task description
   n                     Set current version
   r                     Set selected task version
 	v                     Pick filter version from menu
@@ -258,13 +265,21 @@ func newModel(csvPath string) (model, error) {
 	in.Prompt = "> "
 	in.CharLimit = 512
 	in.Width = 60
+	desc := textarea.New()
+	desc.Placeholder = "Detailed description..."
+	desc.SetWidth(80)
+	desc.SetHeight(8)
+	desc.ShowLineNumbers = false
+	desc.Prompt = ""
+	desc.Blur()
 	m := model{
-		projectName: strings.TrimSuffix(filepath.Base(csvPath), filepath.Ext(csvPath)),
-		csvPath:     csvPath,
-		tasksByID:   byID,
-		roots:       roots,
-		input:       in,
-		status:      "ready",
+		projectName:      strings.TrimSuffix(filepath.Base(csvPath), filepath.Ext(csvPath)),
+		csvPath:          csvPath,
+		tasksByID:        byID,
+		roots:            roots,
+		input:            in,
+		descriptionInput: desc,
+		status:           "ready",
 	}
 	m.rebuildVersions()
 	versionFromFile, err := readVersionFile(filepath.Dir(csvPath))
@@ -289,6 +304,9 @@ func (m model) Init() tea.Cmd { return m.pollVersionCmd() }
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, handled := m.handleRuntimeMsg(msg); handled {
 		return next, cmd
+	}
+	if m.mode == modeDescription {
+		return m.updateDescription(msg)
 	}
 	if m.mode == modePicker {
 		return m.updatePicker(msg)
@@ -444,6 +462,13 @@ func (m model) handleTaskEditingKey(key string) (model, tea.Cmd, bool) {
 		return m, m.saveCmd(), true
 	case "u":
 		return m, m.undoDeleteCmd(), true
+	case "t":
+		t := m.selected()
+		if t == nil {
+			return m, nil, true
+		}
+		m.startDescriptionEditor(t)
+		return m, nil, true
 	case "n":
 		m.startInput(actionNewVersion, "new version", "")
 		return m, nil, true
@@ -537,6 +562,31 @@ func (m model) updateInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m model) updateDescription(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, isKey := msg.(tea.KeyMsg)
+	if isKey {
+		switch k.String() {
+		case "esc":
+			m.mode = modeNormal
+			m.descriptionTargetID = ""
+			m.descriptionInput.Blur()
+			m.status = "cancelled"
+			return m, nil
+		case "ctrl+s":
+			cmd, closeEditor := m.commitDescription(strings.TrimSpace(m.descriptionInput.Value()))
+			if closeEditor {
+				m.mode = modeNormal
+				m.descriptionTargetID = ""
+				m.descriptionInput.Blur()
+			}
+			return m, cmd
+		}
+	}
+	var cmd tea.Cmd
+	m.descriptionInput, cmd = m.descriptionInput.Update(msg)
 	return m, cmd
 }
 
@@ -749,6 +799,36 @@ func (m *model) startInput(a inputAction, prompt string, initial string) {
 	m.input.SetValue(initial)
 	m.input.CursorEnd()
 	m.input.Focus()
+}
+
+func (m *model) startDescriptionEditor(t *task) {
+	if t == nil {
+		return
+	}
+	m.mode = modeDescription
+	m.descriptionTargetID = t.ID
+	m.descriptionInput.SetValue(t.Description)
+	m.descriptionInput.CursorEnd()
+	m.descriptionInput.Focus()
+	m.status = "description editor: ctrl+s save, esc cancel"
+}
+
+func (m *model) commitDescription(value string) (tea.Cmd, bool) {
+	t := m.tasksByID[m.descriptionTargetID]
+	if t == nil {
+		m.status = "task not found"
+		return nil, true
+	}
+	value = strings.TrimSpace(value)
+	t.Description = value
+	m.rebuildVisible()
+	m.cursorToID(t.ID)
+	if value == "" {
+		m.status = "description cleared"
+	} else {
+		m.status = "description saved"
+	}
+	return m.saveCmd(), true
 }
 
 func (m *model) startPicker(a inputAction, title string, options []string, selected string) {
@@ -1087,6 +1167,9 @@ func exportPathForCSV(csvPath string) string {
 func (m model) View() string {
 	header := headerStyle.Render(fmt.Sprintf("Project: %s | CSV: %s | Project Version: %s | Filter: %s", m.projectName, filepath.Base(m.csvPath), showCurrentVersion(m.currentVersion), showFilterVersion(m.filterVersion)))
 	body := m.renderBody()
+	if m.mode == modeDescription {
+		body = m.renderDescriptionModal()
+	}
 	if m.mode == modePicker {
 		body = m.renderPickerPanel()
 	}
@@ -1097,6 +1180,8 @@ func (m model) View() string {
 	status := openStyle.Render("status: " + m.status)
 	if m.mode == modeInput {
 		status = cursorStyle.Render("input: ") + m.input.View()
+	} else if m.mode == modeDescription {
+		status = cursorStyle.Render("description: ctrl+s save | esc cancel")
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer, status)
 }
@@ -1104,6 +1189,9 @@ func (m model) View() string {
 func (m model) footerText() string {
 	if m.mode == modeInput {
 		return "enter submit | esc cancel | ? help"
+	}
+	if m.mode == modeDescription {
+		return "type description | ctrl+s save | esc cancel"
 	}
 	if m.mode == modePicker {
 		return "up/down or j/k select | enter apply | esc cancel"
@@ -1122,12 +1210,12 @@ func (m model) footerText() string {
 	if len(m.undoRows) > 0 {
 		parts = append(parts, "u undo")
 	}
-	parts = append(parts, "space done", "n version", "r task version", "v filter", "e/E export")
+	parts = append(parts, "t description", "space done", "n version", "r task version", "v filter", "e/E export")
 	return strings.Join(parts, " | ")
 }
 
 func shortHelpText() string {
-	return "keys: a/A add task, d delete(confirm), u undo delete, space done, n/r version, v picker or [/] filter, e/E export"
+	return "keys: a/A add task, d delete(confirm), u undo delete, t description, space done, n/r version, v picker or [/] filter, e/E export"
 }
 
 func (m model) renderHelpPanel() string {
@@ -1140,6 +1228,7 @@ func (m model) renderHelpPanel() string {
 		"  done/open: space",
 		"  delete: d then d to confirm",
 		"  undo delete: u",
+		"  edit description: t (ctrl+s save, esc cancel)",
 		"  versions: n set project, r set task, v set filter",
 		"  picker controls: up/down or j/k, enter apply, esc cancel",
 		"  filter quick cycle: [ / ]  | clear: 0",
@@ -1163,6 +1252,16 @@ func (m model) renderPickerPanel() string {
 	}
 	lines = append(lines, "")
 	return strings.Join(lines, "\n")
+}
+
+func (m model) renderDescriptionModal() string {
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#7FDBFF")).
+		Padding(0, 1)
+	title := headerStyle.Render("Task description")
+	hint := faintStyle.Render("ctrl+s save | esc cancel")
+	return box.Render(strings.Join([]string{title, hint, m.descriptionInput.View()}, "\n"))
 }
 
 func (m model) renderBody() string {
@@ -1210,6 +1309,16 @@ func (m model) renderBody() string {
 			row = "  " + row
 		}
 		lines = append(lines, row)
+		if t.Description != "" {
+			descPrefix := "  " + v.Prefix + "   "
+			for _, line := range strings.Split(t.Description, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" {
+					continue
+				}
+				lines = append(lines, descPrefix+faintStyle.Render(trimmed))
+			}
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1362,6 +1471,12 @@ func parseTaskRows(recs [][]string) []taskRow {
 			Type:     normalizeType(strings.TrimSpace(rec[3])),
 			Status:   normalizeStatus(strings.TrimSpace(rec[4])),
 			Title:    strings.TrimSpace(rec[5]),
+			Description: func() string {
+				if len(rec) >= 7 {
+					return strings.TrimSpace(rec[6])
+				}
+				return ""
+			}(),
 		})
 	}
 	return rows
@@ -1374,13 +1489,14 @@ func buildTaskIndex(rows []taskRow) map[string]*task {
 			continue
 		}
 		byID[row.ID] = &task{
-			ID:       row.ID,
-			ParentID: row.ParentID,
-			Version:  row.Version,
-			Type:     row.Type,
-			Status:   row.Status,
-			Title:    row.Title,
-			Expanded: true,
+			ID:          row.ID,
+			ParentID:    row.ParentID,
+			Version:     row.Version,
+			Type:        row.Type,
+			Status:      row.Status,
+			Title:       row.Title,
+			Description: row.Description,
+			Expanded:    true,
 		}
 	}
 	return byID
@@ -1412,12 +1528,13 @@ func flattenRows(roots []*task) []taskRow {
 	var walk func(*task)
 	walk = func(t *task) {
 		rows = append(rows, taskRow{
-			ID:       t.ID,
-			ParentID: t.ParentID,
-			Version:  t.Version,
-			Type:     normalizeType(t.Type),
-			Status:   normalizeStatus(t.Status),
-			Title:    t.Title,
+			ID:          t.ID,
+			ParentID:    t.ParentID,
+			Version:     t.Version,
+			Type:        normalizeType(t.Type),
+			Status:      normalizeStatus(t.Status),
+			Title:       t.Title,
+			Description: strings.TrimSpace(t.Description),
 		})
 		for _, c := range t.Children {
 			walk(c)
@@ -1438,12 +1555,12 @@ func writeRows(path string, rows []taskRow) error {
 	}
 	defer func() { _ = os.Remove(tmp) }()
 	w := csv.NewWriter(f)
-	if err := w.Write([]string{"ID", "ParentID", "Version", "Type", "Status", "Title"}); err != nil {
+	if err := w.Write([]string{"ID", "ParentID", "Version", "Type", "Status", "Title", "Description"}); err != nil {
 		f.Close()
 		return err
 	}
 	for _, r := range rows {
-		if err := w.Write([]string{r.ID, r.ParentID, r.Version, r.Type, r.Status, r.Title}); err != nil {
+		if err := w.Write([]string{r.ID, r.ParentID, r.Version, r.Type, r.Status, r.Title, strings.TrimSpace(r.Description)}); err != nil {
 			f.Close()
 			return err
 		}
@@ -1506,6 +1623,15 @@ func writeMarkdown(path string, roots []*task, currentVersion string, includeSub
 			line += fmt.Sprintf(" *(%s)*", t.Version)
 		}
 		b.WriteString(line + "\n")
+		if desc := strings.TrimSpace(t.Description); desc != "" {
+			for _, part := range strings.Split(desc, "\n") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				b.WriteString(fmt.Sprintf("%s  > %s\n", indent, part))
+			}
+		}
 		if includeSubtasks {
 			for _, c := range t.Children {
 				walk(c, depth+1)

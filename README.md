@@ -59,9 +59,11 @@ trailblazer -h
 - a / A: add child / root task
 - space: toggle done
 - d / x: delete selected task (press twice to confirm)
+- u: undo last delete
+- t: edit selected task description (Ctrl+S save, Esc cancel)
 - n: create version
 - r: set selected task version
-- v: set filter version directly (all or x.y.z)
+- v: pick filter version from menu
 - [ / ]: switch filter version
 - 0: clear filter (show all versions)
 - e / E: export parents-only markdown / export full tree markdown
