@@ -53,6 +53,7 @@ const (
 	modeInput
 	modePicker
 	modeDescription
+	modeConfirmVersion
 )
 
 const versionPollInterval = 2 * time.Second
@@ -110,6 +111,7 @@ type model struct {
 	pickerOptions       []string
 	pickerIndex         int
 	pickerAction        inputAction
+	confirmVersionYes   bool
 	showHelp            bool
 	pendingDeleteID     string
 	undoRows            []taskRow
@@ -234,13 +236,15 @@ Flags:
 TUI keys:
   q                     Quit
   arrows/j/k            Move cursor
-  h/l or Enter          Collapse/expand selected task
+	left/l or Enter       Collapse/expand selected task
+	h                     Show hotkeys help
   a / A                 Add child/root task
   space                 Toggle done/open
   d / x                 Delete selected task with children
 	u                     Undo last delete
 	t                     Edit selected task description
   n                     Set current version
+	w                     Write current version to VERSION file
   r                     Set selected task version
 	v                     Pick filter version from menu
   [ / ]                 Cycle version filter
@@ -304,6 +308,9 @@ func (m model) Init() tea.Cmd { return m.pollVersionCmd() }
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, handled := m.handleRuntimeMsg(msg); handled {
 		return next, cmd
+	}
+	if m.mode == modeConfirmVersion {
+		return m.updateConfirmVersion(msg)
 	}
 	if m.mode == modeDescription {
 		return m.updateDescription(msg)
@@ -375,6 +382,10 @@ func (m model) handleRuntimeMsg(msg tea.Msg) (model, tea.Cmd, bool) {
 
 func (m model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := k.String()
+	if m.showHelp {
+		m.showHelp = false
+		return m, nil
+	}
 	if key != "d" && key != "x" && key != "u" {
 		m.pendingDeleteID = ""
 	}
@@ -397,28 +408,16 @@ func (m model) handleNavigationKey(key string) (model, tea.Cmd, bool) {
 	switch key {
 	case "ctrl+c", "q":
 		return m, tea.Quit, true
-	case "?":
-		m.showHelp = !m.showHelp
-		if m.showHelp {
-			m.status = "help: press ? or esc to close"
-		} else {
-			m.status = "help closed"
-		}
+	case "h":
+		m.showHelp = true
 		return m, nil, true
-	case "esc":
-		if m.showHelp {
-			m.showHelp = false
-			m.status = "help closed"
-			return m, nil, true
-		}
-		return m, nil, false
 	case "up", "k":
 		m.moveCursor(-1)
 		return m, nil, true
 	case "down", "j":
 		m.moveCursor(1)
 		return m, nil, true
-	case "left", "h":
+	case "left":
 		m.setSelectedExpanded(false)
 		return m, nil, true
 	case "right", "l", "enter":
@@ -471,6 +470,13 @@ func (m model) handleTaskEditingKey(key string) (model, tea.Cmd, bool) {
 		return m, nil, true
 	case "n":
 		m.startInput(actionNewVersion, "new version", "")
+		return m, nil, true
+	case "w":
+		if strings.TrimSpace(m.currentVersion) == "" {
+			m.status = "current version is empty"
+			return m, nil, true
+		}
+		m.startConfirmVersionWrite()
 		return m, nil, true
 	case "r":
 		t := m.selected()
@@ -634,6 +640,48 @@ func (m model) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m model) updateConfirmVersion(msg tea.Msg) (tea.Model, tea.Cmd) {
+	k, isKey := msg.(tea.KeyMsg)
+	if !isKey {
+		return m, nil
+	}
+	switch k.String() {
+	case "left", "right", "tab":
+		m.confirmVersionYes = !m.confirmVersionYes
+		return m, nil
+	case "y":
+		m.confirmVersionYes = true
+		cmd := m.commitConfirmVersionChoice()
+		return m, cmd
+	case "n", "esc":
+		m.confirmVersionYes = false
+		cmd := m.commitConfirmVersionChoice()
+		return m, cmd
+	case "enter":
+		cmd := m.commitConfirmVersionChoice()
+		return m, cmd
+	default:
+		return m, nil
+	}
+}
+
+func (m *model) commitConfirmVersionChoice() tea.Cmd {
+	yes := m.confirmVersionYes
+	m.mode = modeNormal
+	m.confirmVersionYes = false
+	if !yes {
+		m.status = "cancelled"
+		return nil
+	}
+	version := strings.TrimSpace(m.currentVersion)
+	if version == "" {
+		m.status = "current version is empty"
+		return nil
+	}
+	m.status = "writing VERSION: " + version
+	return m.writeVersionFileCmd(version)
+}
+
 func (m *model) commitInput(value string) (tea.Cmd, bool) {
 	switch m.inputAction {
 	case actionAddRoot, actionAddChild:
@@ -738,7 +786,7 @@ func (m *model) commitNewVersion(value string) (tea.Cmd, bool) {
 	m.setCurrentVersion(value)
 	m.rebuildVisible()
 	m.status = "version " + value
-	return m.writeVersionFileCmd(value), true
+	return nil, true
 }
 
 func (m *model) commitSetTaskVersion(value string) (tea.Cmd, bool) {
@@ -843,6 +891,11 @@ func (m *model) startPicker(a inputAction, title string, options []string, selec
 			break
 		}
 	}
+}
+
+func (m *model) startConfirmVersionWrite() {
+	m.mode = modeConfirmVersion
+	m.confirmVersionYes = false
 }
 
 func (m *model) selected() *task {
@@ -1173,22 +1226,27 @@ func (m model) View() string {
 	if m.mode == modePicker {
 		body = m.renderPickerPanel()
 	}
+	if m.mode == modeConfirmVersion {
+		body = m.renderVersionConfirmModal()
+	}
 	footer := faintStyle.Render(m.footerText())
 	if m.showHelp {
 		body = m.renderHelpPanel()
 	}
-	status := openStyle.Render("status: " + m.status)
+	status := openStyle.Render(m.status)
 	if m.mode == modeInput {
 		status = cursorStyle.Render("input: ") + m.input.View()
 	} else if m.mode == modeDescription {
 		status = cursorStyle.Render("description: ctrl+s save | esc cancel")
+	} else if m.mode == modeConfirmVersion {
+		status = cursorStyle.Render("confirm VERSION update")
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer, status)
 }
 
 func (m model) footerText() string {
 	if m.mode == modeInput {
-		return "enter submit | esc cancel | ? help"
+		return "enter submit | esc cancel"
 	}
 	if m.mode == modeDescription {
 		return "type description | ctrl+s save | esc cancel"
@@ -1196,26 +1254,17 @@ func (m model) footerText() string {
 	if m.mode == modePicker {
 		return "up/down or j/k select | enter apply | esc cancel"
 	}
+	if m.mode == modeConfirmVersion {
+		return "left/right select | enter confirm | y yes | n/esc no"
+	}
 	if m.showHelp {
-		return "? close help | q quit"
+		return "press any key to close"
 	}
-	parts := []string{
-		"q quit",
-		"? help",
-		"arrows/j/k move",
-		"a child",
-		"A root",
-		"d delete(confirm)",
-	}
-	if len(m.undoRows) > 0 {
-		parts = append(parts, "u undo")
-	}
-	parts = append(parts, "t description", "space done", "n version", "r task version", "v filter", "e/E export")
-	return strings.Join(parts, " | ")
+	return "Press h for help"
 }
 
 func shortHelpText() string {
-	return "keys: a/A add task, d delete(confirm), u undo delete, t description, space done, n/r version, v picker or [/] filter, e/E export"
+	return "press h to show all hotkeys"
 }
 
 func (m model) renderHelpPanel() string {
@@ -1223,19 +1272,39 @@ func (m model) renderHelpPanel() string {
 		"",
 		headerStyle.Render("Help"),
 		"  move: arrows / j / k",
-		"  expand/collapse: h / l / enter",
+		"  collapse/expand: left / l / enter",
 		"  add: a child, A root",
 		"  done/open: space",
 		"  delete: d then d to confirm",
 		"  undo delete: u",
 		"  edit description: t (ctrl+s save, esc cancel)",
-		"  versions: n set project, r set task, v set filter",
+		"  versions: n set project, w write VERSION file, r set task, v set filter",
 		"  picker controls: up/down or j/k, enter apply, esc cancel",
 		"  filter quick cycle: [ / ]  | clear: 0",
 		"  export: e parents-only, E full tree",
-		"  close help: ? or esc",
+		"  close help: any key",
 		"",
 	}, "\n")
+}
+
+func (m model) renderVersionConfirmModal() string {
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#7FDBFF")).
+		Padding(0, 1)
+	title := headerStyle.Render("Write VERSION file")
+	line := "Write current version to VERSION: " + showCurrentVersion(m.currentVersion)
+	yes := " Yes "
+	no := " No "
+	if m.confirmVersionYes {
+		yes = cursorStyle.Render("[" + yes + "]")
+		no = "[" + no + "]"
+	} else {
+		yes = "[" + yes + "]"
+		no = cursorStyle.Render("[" + no + "]")
+	}
+	hint := faintStyle.Render("left/right or tab select | enter confirm | y yes | n/esc no")
+	return box.Render(strings.Join([]string{title, line, yes + " " + no, hint}, "\n"))
 }
 
 func (m model) renderPickerPanel() string {
@@ -1281,6 +1350,7 @@ func (m model) renderBody() string {
 		return "\n(no tasks yet; press A for root task, ? for help)\n"
 	}
 	lines := make([]string, 0, len(m.visible)+2)
+	cursorLine := 0
 	for i, v := range m.visible {
 		t := v.Node
 		check := "[ ]"
@@ -1304,6 +1374,7 @@ func (m model) renderBody() string {
 		}
 		row := fmt.Sprintf("%s%s %s %s %s%s", v.Prefix, check, typeTag(t.Type), title, version, missed)
 		if i == m.cursor {
+			cursorLine = len(lines)
 			row = cursorStyle.Render("> ") + row
 		} else {
 			row = "  " + row
@@ -1320,7 +1391,50 @@ func (m model) renderBody() string {
 			}
 		}
 	}
+	start, end := m.listViewportRange(len(lines), cursorLine)
+	lines = lines[start:end]
 	return strings.Join(lines, "\n")
+}
+
+func (m model) listViewportRange(totalLines int, cursorLine int) (int, int) {
+	if totalLines <= 0 {
+		return 0, 0
+	}
+	maxLines := m.listViewportHeight()
+	if maxLines <= 0 || maxLines >= totalLines {
+		return 0, totalLines
+	}
+	if cursorLine < 0 {
+		cursorLine = 0
+	}
+	if cursorLine >= totalLines {
+		cursorLine = totalLines - 1
+	}
+	start := cursorLine - maxLines/2
+	if start < 0 {
+		start = 0
+	}
+	maxStart := totalLines - maxLines
+	if start > maxStart {
+		start = maxStart
+	}
+	end := start + maxLines
+	if end > totalLines {
+		end = totalLines
+	}
+	return start, end
+}
+
+func (m model) listViewportHeight() int {
+	if m.height <= 0 {
+		return 0
+	}
+	// Reserve one line each for header, footer, and status.
+	maxLines := m.height - 3
+	if maxLines < 1 {
+		return 1
+	}
+	return maxLines
 }
 
 func typeTag(t string) string {

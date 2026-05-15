@@ -53,17 +53,54 @@ trailblazer -h
 ## Handy keys
 
 - q: quit
-- ?: show in-app key hints
+- h: show in-app key hints (press any key to close)
 - arrows / j / k: move
-- h / l / enter: collapse / expand
+- left / l / enter: collapse / expand
 - a / A: add child / root task
 - space: toggle done
 - d / x: delete selected task (press twice to confirm)
 - u: undo last delete
 - t: edit selected task description (Ctrl+S save, Esc cancel)
 - n: create version
+- w: write current version to VERSION (with Yes/No confirmation)
 - r: set selected task version
 - v: pick filter version from menu
 - [ / ]: switch filter version
 - 0: clear filter (show all versions)
 - e / E: export parents-only markdown / export full tree markdown
+
+## Task CSV format
+
+Trailblazer reads and writes one CSV file (default: trailblazer.csv) with this header:
+
+```csv
+ID,ParentID,Version,Type,Status,Title,Description
+```
+
+Columns:
+
+- ID: unique task identifier. App-generated IDs look like T18AF00CB1BFBF474.
+- ParentID: parent task ID. Leave empty for root tasks.
+- Version: semantic version attached to the task, for example 1.2.3.
+- Type: task type. Accepted values: feature, bugfix, improvement.
+- Status: open or done.
+- Title: short task title shown in the list.
+- Description: optional multi-line details (saved in one CSV cell).
+
+Notes:
+
+- Header row is optional but recommended.
+- Rows with fewer than 6 columns are ignored.
+- If ParentID points to a missing task, Trailblazer promotes that row to a root task.
+- Type aliases are normalized on load: b/bug -> bugfix, i/improve -> improvement, everything else -> feature.
+- Status aliases are normalized on load: closed/x -> done, everything else -> open.
+
+Example:
+
+```csv
+ID,ParentID,Version,Type,Status,Title,Description
+T1,,1.0.0,feature,open,Release dashboard,Main task v1
+T2,T1,1.0.0,bugfix,done,Fix login redirect,Resolved bug
+T3,T1,1.1.0,improvement,open,Reduce build time,"This is wery important task
+with description."
+```

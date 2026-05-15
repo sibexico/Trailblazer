@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -64,8 +65,8 @@ func TestUsageText(t *testing.T) {
 
 func TestShortHelpText(t *testing.T) {
 	text := shortHelpText()
-	if !strings.Contains(text, "add task") || !strings.Contains(text, "export") {
-		t.Fatalf("shortHelpText missing key guidance: %q", text)
+	if !strings.Contains(text, "press h") {
+		t.Fatalf("shortHelpText missing h-help guidance: %q", text)
 	}
 }
 
@@ -385,6 +386,54 @@ func TestRenderBodyShowsDescriptionBelowTask(t *testing.T) {
 	}
 }
 
+func TestRenderBodyScrollsWithCursorForLongLists(t *testing.T) {
+	roots := make([]*task, 0, 20)
+	byID := make(map[string]*task, 20)
+	for i := 0; i < 20; i++ {
+		id := "T" + strings.ToUpper(strconv.FormatInt(int64(i), 16))
+		n := &task{ID: id, Status: "open", Title: "task " + strconv.Itoa(i), Expanded: true}
+		roots = append(roots, n)
+		byID[id] = n
+	}
+	m := model{tasksByID: byID, roots: roots, height: 8}
+	m.rebuildVisible()
+
+	m.cursor = len(m.visible) - 1
+	bottomView := m.renderBody()
+	if !strings.Contains(bottomView, "task 19") {
+		t.Fatalf("expected viewport near the selected last task")
+	}
+	if strings.Contains(bottomView, "task 0") {
+		t.Fatalf("did not expect first task in last-task viewport")
+	}
+
+	m.cursor = 0
+	topView := m.renderBody()
+	if !strings.Contains(topView, "task 0") {
+		t.Fatalf("expected viewport near the selected first task")
+	}
+	if strings.Contains(topView, "task 19") {
+		t.Fatalf("did not expect last task in first-task viewport")
+	}
+}
+
+func TestListViewportHeightAndRange(t *testing.T) {
+	m := model{height: 6}
+	if got := m.listViewportHeight(); got != 3 {
+		t.Fatalf("expected viewport height 3, got %d", got)
+	}
+
+	start, end := m.listViewportRange(20, 19)
+	if start != 17 || end != 20 {
+		t.Fatalf("expected range [17,20), got [%d,%d)", start, end)
+	}
+
+	start, end = m.listViewportRange(20, 0)
+	if start != 0 || end != 3 {
+		t.Fatalf("expected range [0,3), got [%d,%d)", start, end)
+	}
+}
+
 func TestCommitAddTaskEmptyKeepsInputOpen(t *testing.T) {
 	m := model{tasksByID: map[string]*task{}, roots: []*task{}, inputAction: actionAddRoot}
 	cmd, closeInput := m.commitAddTask("")
@@ -487,33 +536,31 @@ func TestHandleKeyClearsPendingDeleteOnOtherKey(t *testing.T) {
 
 func TestHelpToggleAndClose(t *testing.T) {
 	m := model{}
-	m1, _, handled := m.handleNavigationKey("?")
+	m1, _, handled := m.handleNavigationKey("h")
 	if !handled || !m1.showHelp {
-		t.Fatalf("expected help to open on ?")
+		t.Fatalf("expected help to open on h")
 	}
-	m2, _, handled := m1.handleNavigationKey("esc")
-	if !handled || m2.showHelp {
-		t.Fatalf("expected help to close on esc")
+	next, _ := m1.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m2 := next.(model)
+	if m2.showHelp {
+		t.Fatalf("expected help to close on any key")
 	}
 }
 
 func TestFooterTextByModeAndUndo(t *testing.T) {
 	m := model{}
-	if got := m.footerText(); !strings.Contains(got, "d delete(confirm)") {
-		t.Fatalf("normal footer missing delete hint: %q", got)
-	}
-	if got := m.footerText(); !strings.Contains(got, "t description") {
-		t.Fatalf("normal footer missing description hint: %q", got)
+	if got := m.footerText(); got != "h help" {
+		t.Fatalf("normal footer should only show h help, got: %q", got)
 	}
 
 	m.mode = modeInput
-	if got := m.footerText(); !strings.Contains(got, "enter submit") {
+	if got := m.footerText(); !strings.Contains(got, "enter submit") || strings.Contains(got, "help") {
 		t.Fatalf("input footer missing submit hint: %q", got)
 	}
 
 	m.mode = modeNormal
 	m.showHelp = true
-	if got := m.footerText(); !strings.Contains(got, "close help") {
+	if got := m.footerText(); !strings.Contains(got, "any key") {
 		t.Fatalf("help footer missing close hint: %q", got)
 	}
 
@@ -526,8 +573,8 @@ func TestFooterTextByModeAndUndo(t *testing.T) {
 	m.showHelp = false
 	m.mode = modeNormal
 	m.undoRows = []taskRow{{ID: "T1"}}
-	if got := m.footerText(); !strings.Contains(got, "u undo") {
-		t.Fatalf("footer should include undo when snapshot exists: %q", got)
+	if got := m.footerText(); got != "h help" {
+		t.Fatalf("normal footer should remain compact even with undo snapshot: %q", got)
 	}
 }
 
@@ -839,7 +886,9 @@ func TestExportFilterAndSyncFunctions(t *testing.T) {
 
 func TestRenderAndHelperCoverage(t *testing.T) {
 	taskNode := &task{ID: "T1", Status: "open", Title: "root", Expanded: true, Type: "bugfix"}
-	m := model{projectName: "demo", csvPath: "trailblazer.csv", tasksByID: map[string]*task{"T1": taskNode}, roots: []*task{taskNode}, descriptionInput: textarea.New()}
+	tmp := t.TempDir()
+	csvPath := filepath.Join(tmp, "trailblazer.csv")
+	m := model{projectName: "demo", csvPath: csvPath, tasksByID: map[string]*task{"T1": taskNode}, roots: []*task{taskNode}, descriptionInput: textarea.New()}
 	m.rebuildVisible()
 
 	_ = newTaskID()
@@ -885,7 +934,55 @@ func TestRenderAndHelperCoverage(t *testing.T) {
 	if msg := m.writeVersionFileCmd("1.2.3")(); msg == nil {
 		t.Fatalf("expected version write cmd message")
 	}
+	if _, err := os.Stat(filepath.Join(tmp, "VERSION")); err != nil {
+		t.Fatalf("expected VERSION file in temp dir, got error: %v", err)
+	}
 	if msg := m.exportCmd(false)(); msg == nil {
 		t.Fatalf("expected export cmd message")
+	}
+}
+
+func TestVersionWriteConfirmFlow(t *testing.T) {
+	tmp := t.TempDir()
+	csvPath := filepath.Join(tmp, "trailblazer.csv")
+	n := &task{ID: "T1", Status: "open", Title: "root", Expanded: true}
+	m := model{csvPath: csvPath, tasksByID: map[string]*task{"T1": n}, roots: []*task{n}, currentVersion: "1.2.3"}
+	m.rebuildVisible()
+
+	m1, _, handled := m.handleTaskEditingKey("w")
+	if !handled || m1.mode != modeConfirmVersion {
+		t.Fatalf("expected w key to open VERSION confirm modal")
+	}
+
+	next, cmd := m1.updateConfirmVersion(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m2 := next.(model)
+	if m2.mode != modeNormal {
+		t.Fatalf("expected modal to close after confirming yes")
+	}
+	if cmd == nil {
+		t.Fatalf("expected write command after confirming yes")
+	}
+	msg := cmd()
+	if _, ok := msg.(versionFileWriteDoneMsg); !ok {
+		t.Fatalf("expected versionFileWriteDoneMsg, got %T", msg)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "VERSION")); err != nil {
+		t.Fatalf("expected VERSION file written in temp dir, got error: %v", err)
+	}
+}
+
+func TestVersionWriteConfirmCancel(t *testing.T) {
+	n := &task{ID: "T1", Status: "open", Title: "root", Expanded: true}
+	m := model{tasksByID: map[string]*task{"T1": n}, roots: []*task{n}, currentVersion: "1.2.3"}
+	m.rebuildVisible()
+	m.startConfirmVersionWrite()
+
+	next, cmd := m.updateConfirmVersion(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	nm := next.(model)
+	if nm.mode != modeNormal {
+		t.Fatalf("expected modal to close on no")
+	}
+	if cmd != nil {
+		t.Fatalf("expected no command when declining VERSION write")
 	}
 }
